@@ -10,17 +10,21 @@ class StockAnalyzer:
     def __init__(self):
         self.min_data_points = 30
 
-    def fetch_data(self, symbol, period='3mo'):
-        """Download OHLCV data"""
+    def fetch_data(self, symbol, period='1mo'): # Periode lebih pendek untuk efisiensi
         try:
-            df = yf.download(symbol, period=period, progress=False, auto_adjust=True)
+            df = yf.download(f"{symbol}.JK", period=period, progress=False, auto_adjust=True)
+            if df.empty: return None
+
+            # Penanganan MultiIndex yang lebih aman
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
             return df if len(df) >= self.min_data_points else None
         except Exception as e:
             logger.error(f"Data fetch error {symbol}: {e}")
             return None
 
     def calculate_score(self, df):
-        """AI Scoring 0-100"""
         if len(df) < self.min_data_points:
             return 0
 
@@ -28,20 +32,21 @@ class StockAnalyzer:
         df['rsi'] = ta.rsi(df['Close'], length=14)
         df['ema20'] = ta.ema(df['Close'], length=20)
         df['sma50'] = ta.sma(df['Close'], length=50)
-        df['bb'] = ta.bbands(df['Close'], length=20)
-        df['bb_upper'] = df['bb']['BBU_20_2.0']
-        df['bb_lower'] = df['bb']['BBL_20_2.0']
 
-        # Volume analysis
+        bb = ta.bbands(df['Close'], length=20)
+        if bb is not None:
+            df['bb_upper'] = bb.iloc[:, 2]
+            df['bb_lower'] = bb.iloc[:, 0]
+
         df['vol_ma'] = ta.sma(df['Volume'], length=10)
         df['vol_ratio'] = df['Volume'] / df['vol_ma']
-
-        # Support/Resistance
         df['support'] = ta.lowest(df['Low'], length=20)
-        df['resistance'] = ta.highest(df['High'], length=20)
+
+        # Bersihkan NaN sebelum mengambil baris terakhir
+        df = df.dropna()
+        if df.empty: return 0
 
         latest = df.iloc[-1]
-
         score = 0
 
         # RSI Oversold (30 pts max)

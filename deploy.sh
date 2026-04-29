@@ -1,6 +1,9 @@
 #!/bin/bash
 cd /root/lq45-signal-bot
-pip3 install -r requirements.txt --quiet
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt --quiet
+touch bot.log && chmod 666 bot.log
 cp systemd/lq45-signal-bot.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable lq45-signal-bot

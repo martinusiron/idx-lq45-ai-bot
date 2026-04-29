@@ -1,6 +1,7 @@
 from telegram import Bot
 import asyncio
 import logging
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,9 @@ class TelegramNotifier:
         message = f"🚨 <b>HIGH PROBABILITY ({len(signals)})</b>\n\n"
 
         for signal in signals:
-            message += f"📈 <b>{signal['symbol']}</b>\n"
-            message += f"💰 Rp{signal['price']:,} | <b>Score: {signal['score']}</b>\n"
+            price_val = signal['price']
+            formatted_price = f"{int(price_val):,}" if pd.notna(price_val) else "N/A"
+            message += f"💰 Rp{formatted_price} | <b>Score: {signal['score']}</b>\n"
             message += f"📊 RSI: {signal['rsi']} | Vol: {signal['volume_ratio']}x | Δ{signal['change_pct']:.1f}%\n"
             message += f"⏰ {pd.Timestamp.now().strftime('%H:%M WIB')}\n\n"
 

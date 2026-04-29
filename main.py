@@ -1,7 +1,8 @@
 import asyncio
 import logging
 from datetime import datetime
-import schedule
+
+import pytz
 import time
 from analyzer import StockAnalyzer
 from notifier import TelegramNotifier
@@ -26,7 +27,9 @@ class LQ45SignalBot:
         logger.info("🚀 LQ45 Signal Bot initialized")
 
     def is_market_open(self):
-        now = datetime.now()
+        # Change: Force Jakarta timezone
+        tz = pytz.timezone('Asia/Jakarta')
+        now = datetime.now(tz)
         return MARKET_OPEN <= now.hour < MARKET_CLOSE and now.weekday() < 5
 
     async def scan_market(self):
@@ -68,21 +71,20 @@ class LQ45SignalBot:
             await self.startup()
             logger.info("Bot running...")
 
-            # Initial scan
-            await self.scan_market()
-
-            # Background scheduler
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, self.run_scheduler)
-
-            # Keep alive
             while True:
-                await asyncio.sleep(60)
+                try:
+                    if self.is_market_open():
+                        await self.scan_market()
+                    else:
+                        logger.info("Market closed. Sleeping...")
 
+                    # Sleep for 15 minutes (900 seconds)
+                    await asyncio.sleep(900)
+                except Exception as e:
+                    logger.error(f"Loop error: {e}")
+                    await asyncio.sleep(60)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
-        except Exception as e:
-            logger.error(f"Fatal error: {e}")
 
 if __name__ == "__main__":
     bot = LQ45SignalBot()
