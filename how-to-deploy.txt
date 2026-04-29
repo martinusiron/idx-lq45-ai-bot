@@ -1,0 +1,17 @@
+# VPS
+mkdir -p /root/idx-lq45-ai-bot/systemd
+cd /root/idx-lq45-ai-bot
+git init && git add . && git commit -m "v1.0"
+# Push ke GitHub
+
+# Deploy
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp systemd/idx-ai-bot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable idx-ai-bot
+systemctl start idx-ai-bot
+
+# Monitor
+journalctl -u idx-ai-bot -f

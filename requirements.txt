@@ -1,0 +1,13 @@
+requests==2.31.0
+pandas==2.1.3
+numpy==1.24.3
+yfinance==0.2.28
+python-telegram-bot==20.7
+schedule==1.2.0
+python-dotenv==1.0.0
+pandas_ta==0.3.14b
+ta==0.10.2
+scikit-learn==1.3.0
+xgboost==1.7.6
+backtrader==1.9.76.123
+flask==2.3.3
