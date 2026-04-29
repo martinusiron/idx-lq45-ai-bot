@@ -1,32 +1,56 @@
-import requests
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from telegram import Bot
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TelegramNotifier:
-    def send_message(self, message):
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    def __init__(self, token, chat_id):
+        self.bot = Bot(token=token)
+        self.chat_id = chat_id
+
+    async def startup_message(self):
+        message = """
+🚀 <b>LQ45 AI Signal Bot LIVE!</b>
+
+⏰ Trading Hours: 09:00-15:00 WIB
+📡 Scan Frequency: Every 15 minutes
+🎯 High Prob Threshold: 75+
+📱 Manual trades via Stockbit app
+
+💰 Rp4 Juta Strategy Ready!
+        """
         try:
-            requests.post(url, data=data)
-        except:
-            pass
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='HTML'
+            )
+            logger.info("Startup message sent")
+        except Exception as e:
+            logger.error(f"Startup message failed: {e}")
 
-    def trade_alert(self, symbol, action, qty, price, confidence):
-        message = f"""
-🚨 <b>Rp4 Juta Bot TRADE</b>
+    async def send_signals(self, signals):
+        if not signals:
+            return
 
-📈 <b>{symbol}</b>
-🎯 <b>{action} {qty:,} @ Rp{price:,.0f}</b>
-🎯 Confidence: <b>{confidence:.0%}</b>
-💰 Used: Rp{qty*price:,.0f} ({qty*price/4000000*100:.0f}%)
-⏰ {pd.Timestamp.now().strftime('%H:%M WIB')}
-        """
-        self.send_message(message)
+        message = f"🚨 <b>HIGH PROBABILITY ({len(signals)})</b>\n\n"
 
-    def status_alert(self, balance, positions):
-        message = f"""
-📊 <b>DAILY STATUS</b>
-💰 Balance: <b>Rp{balance:,.0f}</b>
-📈 Positions: {len(positions)}
-📉 Today P&L: <b>Rp{self.daily_pnl:,.0f}</b>
-        """
-        self.send_message(message)
+        for signal in signals:
+            message += f"📈 <b>{signal['symbol']}</b>\n"
+            message += f"💰 Rp{signal['price']:,} | <b>Score: {signal['score']}</b>\n"
+            message += f"📊 RSI: {signal['rsi']} | Vol: {signal['volume_ratio']}x | Δ{signal['change_pct']:.1f}%\n"
+            message += f"⏰ {pd.Timestamp.now().strftime('%H:%M WIB')}\n\n"
+
+        message += "💡 <b>ACTION: Manual BUY di Stockbit!</b>"
+
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            logger.info(f"Signals alert sent: {len(signals)}")
+        except Exception as e:
+            logger.error(f"Alert failed: {e}")

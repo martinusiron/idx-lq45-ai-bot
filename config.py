@@ -3,17 +3,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# API Keys
-IPOT_API_KEY = os.getenv('IPOT_API_KEY')
-IPOT_APP_ID = os.getenv('IPOT_APP_ID')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Rp4 Juta Settings
-INITIAL_BALANCE = int(os.getenv('INITIAL_BALANCE', '4000000'))
-RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', '0.01'))
+# LQ45 High Liquidity
+LQ45_SYMBOLS = [
+    'ACES', 'ADRO', 'AKRA', 'AMRT', 'AMMN', 'ANTM', 'ARTO', 'ASII', 'BBCA', 'BBNI',
+    'BBRI', 'BBTN', 'BMRI', 'BRIS', 'BRPT', 'CPIN', 'ESSA', 'EXCL', 'GOTO', 'HRUM',
+    'ICBP', 'INCO', 'INDF', 'INKP', 'INTP', 'ISAT', 'ITMG', 'JSMR', 'KLBF', 'MAPI',
+    'MBMA', 'MDKA', 'MEDC', 'MIKA', 'MTEL', 'PGAS', 'PTBA', 'PTPP', 'SIDO', 'SMGR',
+    'TLKM', 'TPIA', 'UNTR', 'UNVR', 'VCOR'
+]
 
-# LQ45 Focus (High liquidity, low price)
-LQ45_SYMBOLS = ['BBRI', 'BRIS', 'BBNI', 'BMRI', 'BBCA', 'TLKM']
+# Trading Hours WIB
+MARKET_OPEN = 9
+MARKET_CLOSE = 15
 
-MARKET_HOURS = {'open': 9, 'close': 15}
+HIGH_PROB_THRESHOLD = 75  # Score minimum

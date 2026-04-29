@@ -1,7 +1,9 @@
 #!/bin/bash
-cd /root/idx-lq45-ai-bot
-git pull origin main
-source venv/bin/activate
-pip install -r requirements.txt -q
-systemctl restart idx-ai-bot
-systemctl status idx-ai-bot --no-pager
+cd /root/lq45-signal-bot
+pip3 install -r requirements.txt --quiet
+cp systemd/lq45-signal-bot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable lq45-signal-bot
+systemctl restart lq45-signal-bot
+systemctl status lq45-signal-bot --no-pager
+echo "🚀 Deploy complete!"

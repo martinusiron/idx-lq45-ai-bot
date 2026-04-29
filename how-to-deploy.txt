@@ -1,17 +1,18 @@
-# VPS
-mkdir -p /root/idx-lq45-ai-bot/systemd
-cd /root/idx-lq45-ai-bot
-git init && git add . && git commit -m "v1.0"
-# Push ke GitHub
+# VPS Biznet
+ssh root@YOUR_IP
 
-# Deploy
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp systemd/idx-ai-bot.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable idx-ai-bot
-systemctl start idx-ai-bot
+# 1. Setup folder
+mkdir -p /root/lq45-signal-bot/systemd
+cd /root/lq45-signal-bot
 
-# Monitor
-journalctl -u idx-ai-bot -f
+# 2. Upload files (nano satu-satu atau git)
+
+# 3. .env
+nano .env  # TELEGRAM_TOKEN & CHAT_ID
+
+# 4. Deploy
+chmod +x deploy.sh
+./deploy.sh
+
+# 5. Monitor
+journalctl -u lq45-signal-bot -f
