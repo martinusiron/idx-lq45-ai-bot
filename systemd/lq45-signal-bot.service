@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/lq45-signal-bot
-Environment=PATH=/root/lq45-signal-bot/venv/bin
-ExecStart=/root/lq45-signal-bot/venv/bin/python3 /root/lq45-signal-bot/main.py
+WorkingDirectory=/home/martinus/idx-lq45-ai-bot
+Environment=PATH=/home/martinus/idx-lq45-ai-bot/venv/bin
+ExecStart=/home/martinus/idx-lq45-ai-bot/venv/bin/python3 /home/martinus/idx-lq45-ai-bot/main.py
 Restart=always
 RestartSec=10
 User=root
