@@ -1,91 +1,148 @@
-import asyncio
 import logging
-from datetime import datetime
-
 import pytz
-import time
+from datetime import time
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Defaults
 from analyzer import StockAnalyzer
-from notifier import TelegramNotifier
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, LQ45_SYMBOLS, HIGH_PROB_THRESHOLD, MARKET_OPEN, MARKET_CLOSE
+from notifier import TelegramFormatter
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, LQ45_SYMBOLS
 
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class LQ45SignalBot:
+class IDXDayTraderBot:
     def __init__(self):
         self.analyzer = StockAnalyzer()
-        self.notifier = TelegramNotifier(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
-        self.symbols = LQ45_SYMBOLS
-        logger.info("🚀 LQ45 Signal Bot initialized")
+        self.tz = pytz.timezone('Asia/Jakarta')
+        self.formatter = TelegramFormatter()
 
-    def is_market_open(self):
-        # Change: Force Jakarta timezone
-        tz = pytz.timezone('Asia/Jakarta')
-        now = datetime.now(tz)
-        return MARKET_OPEN <= now.hour < MARKET_CLOSE and now.weekday() < 5
+    # --- SCHEDULER JOBS ---
+    async def job_morning_signal(self, context: ContextTypes.DEFAULT_TYPE):
+        logger.info("Mencari sinyal pagi...")
+        signals = []
+        for sym in LQ45_SYMBOLS:
+            res = self.analyzer.analyze(sym, threshold=75) # Filter ketat 75
+            if res: signals.append(res)
+        
+        if signals:
+            # Simpan signal pagi di bot_data untuk di-update nanti sore
+            context.bot_data['morning_signals'] = signals
+            msg = self.formatter.format_morning_signal(signals)
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
 
-    async def scan_market(self):
-        """Main scanning logic"""
-        if not self.is_market_open():
-            logger.info("Outside trading hours")
+    async def job_afternoon_update(self, context: ContextTypes.DEFAULT_TYPE):
+        logger.info("Membuat update sore...")
+        morning_signals = context.bot_data.get('morning_signals', [])
+        if not morning_signals:
             return
 
-        logger.info("🔍 Scanning LQ45 symbols...")
-        high_prob_signals = []
+        updates = []
+        for s in morning_signals:
+            # Cek harga terkini tanpa threshold
+            res = self.analyzer.analyze(s['symbol'], threshold=0)
+            if res:
+                pnl = round(((res['price'] - s['price']) / s['price']) * 100, 2)
+                updates.append({
+                    'symbol': s['symbol'],
+                    'current_price': res['price'],
+                    'pnl': pnl
+                })
+        
+        if updates:
+            msg = self.formatter.format_afternoon_update(updates)
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
 
-        for symbol in self.symbols:
-            signal = self.analyzer.analyze(symbol)
-            if signal:
-                high_prob_signals.append(signal)
-                logger.info(f"High prob: {signal['symbol']} ({signal['score']})")
+    # --- COMMAND HANDLERS ---
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        intro = ("🤖 <b>IDX Day Trader Assistant</b>\n\n"
+                 "Gunakan command berikut:\n"
+                 "/signal - Rekomendasi pagi ini\n"
+                 "/update - Status profit/loss sore\n"
+                 "/detail &lt;kode&gt; - Analisa spesifik\n"
+                 "/top - Saham teraktif\n"
+                 "/help - Daftar bantuan\n\n"
+                 "<i>Catatan: Bukan ajakan finansial.</i>")
+        await update.message.reply_text(intro, parse_mode='HTML')
 
-        if high_prob_signals:
-            await self.notifier.send_signals(high_prob_signals)
+    async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("🔎 Menganalisa saham potensial, mohon tunggu...")
+        signals = []
+        for sym in LQ45_SYMBOLS:
+            res = self.analyzer.analyze(sym, threshold=75)
+            if res: signals.append(res)
+        
+        if signals:
+            context.bot_data['morning_signals'] = signals
+            msg = self.formatter.format_morning_signal(signals)
+            await update.message.reply_text(msg, parse_mode='HTML')
         else:
-            logger.info("No high probability signals")
+            await update.message.reply_text("Belum ada setup yang memenuhi kriteria (Skor > 75).")
 
-    async def startup(self):
-        """Send startup message"""
-        await self.notifier.startup_message()
+    async def cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        signals = context.bot_data.get('morning_signals', [])
+        if not signals:
+            await update.message.reply_text("Belum ada sinyal pagi yang dikeluarkan hari ini.")
+            return
+            
+        await update.message.reply_text("⏳ Menghitung Profit/Loss hari ini...")
+        updates = []
+        for s in signals:
+            res = self.analyzer.analyze(s['symbol'], threshold=0)
+            if res:
+                pnl = round(((res['price'] - s['price']) / s['price']) * 100, 2)
+                updates.append({'symbol': s['symbol'], 'current_price': res['price'], 'pnl': pnl})
+                
+        msg = self.formatter.format_afternoon_update(updates)
+        await update.message.reply_text(msg, parse_mode='HTML')
 
-    def run_scheduler(self):
-        """Schedule scanning"""
-        schedule.every(15).minutes.do(lambda: asyncio.create_task(self.scan_market()))
-        logger.info("Scheduler started - scanning every 15 minutes")
+    async def cmd_detail(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await update.message.reply_text("Format salah. Gunakan: /detail BBCA")
+            return
+            
+        symbol = context.args[0].upper()
+        res = self.analyzer.analyze(symbol, threshold=0)
+        
+        if res:
+            msg = self.formatter.format_detail(res)
+            await update.message.reply_text(msg, parse_mode='HTML')
+        else:
+            await update.message.reply_text(f"Data {symbol} tidak ditemukan atau kurang.")
 
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
+    async def cmd_top(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("📊 Memindai seluruh LQ45...")
+        all_data = []
+        for sym in LQ45_SYMBOLS:
+            res = self.analyzer.analyze(sym, threshold=0)
+            if res: all_data.append(res)
+            
+        top_vol = sorted(all_data, key=lambda x: x['volume_ratio'], reverse=True)[:3]
+        top_gainers = sorted(all_data, key=lambda x: x['change_pct'], reverse=True)[:3]
+        
+        msg = self.formatter.format_top(top_vol, top_gainers)
+        await update.message.reply_text(msg, parse_mode='HTML')
 
-    async def run(self):
-        """Main entry point"""
-        try:
-            await self.startup()
-            logger.info("Bot running...")
+    # --- MAIN RUNNER ---
+    def run(self):
+        defaults = Defaults(tzinfo=self.tz)
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).defaults(defaults).build()
 
-            while True:
-                try:
-                    if self.is_market_open():
-                        await self.scan_market()
-                    else:
-                        logger.info("Market closed. Sleeping...")
+        # Command Handlers
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("help", self.cmd_start))
+        app.add_handler(CommandHandler("signal", self.cmd_signal))
+        app.add_handler(CommandHandler("update", self.cmd_update))
+        app.add_handler(CommandHandler("detail", self.cmd_detail))
+        app.add_handler(CommandHandler("top", self.cmd_top))
 
-                    # Sleep for 15 minutes (900 seconds)
-                    await asyncio.sleep(900)
-                except Exception as e:
-                    logger.error(f"Loop error: {e}")
-                    await asyncio.sleep(60)
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
+        # Schedulers - Senin s/d Jumat (0-4)
+        jq = app.job_queue
+        jq.run_daily(self.job_morning_signal, time(hour=9, minute=25), days=(0,1,2,3,4))
+        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(0,1,2,3,4))
+
+        logger.info("🚀 Bot siap menerima command dan menjalankan jadwal otomatis!")
+        app.run_polling()
 
 if __name__ == "__main__":
-    bot = LQ45SignalBot()
-    asyncio.run(bot.run())
+    bot = IDXDayTraderBot()
+    bot.run()

@@ -1,58 +1,61 @@
-from telegram import Bot
-import asyncio
 import logging
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-class TelegramNotifier:
-    def __init__(self, token, chat_id):
-        self.bot = Bot(token=token)
-        self.chat_id = chat_id
+class TelegramFormatter:
+    # Mengubah format menjadi Text Generator untuk dipakai di main.py
+    
+    @staticmethod
+    def format_morning_signal(signals):
+        msg = "📈 <b>Rekomendasi Pagi (09:25 WIB)</b>\n\n"
+        for i, s in enumerate(signals[:3], 1):
+            msg += (f"<b>{i}. {s['symbol']}</b>\n"
+                    f"Entry: {s['price']}\n"
+                    f"TP: {s['tp']} (+4%)\n"
+                    f"SL: {s['sl']}\n"
+                    f"Alasan: {s['alasan']}\n\n")
+        return msg
 
-    async def startup_message(self):
-        message = """
-🚀 <b>LQ45 AI Signal Bot LIVE!</b>
+    @staticmethod
+    def format_afternoon_update(updates):
+        msg = "📉 <b>Update Sore (15:25 WIB)</b>\n\n"
+        for s in updates:
+            # Jika profit > 3% atau loss > 2.5%, status SELL
+            if s['pnl'] >= 3.0 or s['pnl'] <= -2.5:
+                status = "SELL ✅"
+                alasan_akhir = "Target/SL Tercapai"
+            else:
+                status = "HOLD ⏳"
+                alasan_akhir = "Momentum masih dipertahankan"
 
-⏰ Trading Hours: 09:00-15:00 WIB
-📡 Scan Frequency: Every 15 minutes
-🎯 High Prob Threshold: 75+
-📱 Manual trades via Stockbit app
+            msg += (f"<b>{s['symbol']} → {status}</b>\n"
+                    f"Harga: {s['current_price']} ({s['pnl']}%)\n"
+                    f"Alasan: {alasan_akhir}\n\n")
+        return msg
 
-💰 Rp4 Juta Strategy Ready!
-        """
-        try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode='HTML'
-            )
-            logger.info("Startup message sent")
-        except Exception as e:
-            logger.error(f"Startup message failed: {e}")
+    @staticmethod
+    def format_detail(s):
+        vol_m = f"{s['volume_real'] / 1000000:.1f}M"
+        rek = "BUY" if s['score'] >= 75 else "HOLD" if s['score'] >= 50 else "SELL"
+        
+        msg = (f"📊 <b>{s['symbol']}</b>\n\n"
+               f"Harga: {s['price']:,}\n"
+               f"Volume: {vol_m}\n"
+               f"Freq / Net: N/A (API Gratis)\n\n"
+               f"<b>Analisa:</b>\n"
+               f"- {s['alasan']}\n"
+               f"- Skor AI: {s['score']}/100\n"
+               f"- RSI: {s['rsi']}\n\n"
+               f"<b>Rekomendasi: {rek}</b>")
+        return msg
 
-    async def send_signals(self, signals):
-        if not signals:
-            return
-
-        message = f"🚨 <b>HIGH PROBABILITY ({len(signals)})</b>\n\n"
-
-        for signal in signals:
-            price_val = signal['price']
-            formatted_price = f"{int(price_val):,}" if pd.notna(price_val) else "N/A"
-            message += f"💰 Rp{formatted_price} | <b>Score: {signal['score']}</b>\n"
-            message += f"📊 RSI: {signal['rsi']} | Vol: {signal['volume_ratio']}x | Δ{signal['change_pct']:.1f}%\n"
-            message += f"⏰ {pd.Timestamp.now().strftime('%H:%M WIB')}\n\n"
-
-        message += "💡 <b>ACTION: Manual BUY di Stockbit!</b>"
-
-        try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            logger.info(f"Signals alert sent: {len(signals)}")
-        except Exception as e:
-            logger.error(f"Alert failed: {e}")
+    @staticmethod
+    def format_top(top_vol, top_gainers):
+        msg = "🏆 <b>TOP SAHAM LQ45</b>\n\n"
+        msg += "🔥 <b>Volume Tertinggi:</b>\n"
+        for s in top_vol:
+            msg += f"- {s['symbol']} (Vol: {s['volume_ratio']}x rata-rata)\n"
+        msg += "\n🚀 <b>Pergerakan Paling Aktif:</b>\n"
+        for s in top_gainers:
+            msg += f"- {s['symbol']} (+{s['change_pct']}%)\n"
+        return msg
