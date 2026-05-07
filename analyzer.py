@@ -128,160 +128,31 @@ class StockAnalyzer:
     def analyze(self, symbol: str, threshold: int = 75) -> dict | None:
         df = self.fetch_data(symbol)
         if df is None:
+            logger.info(f"[{symbol}] fetch_data return None")
             return None
 
-        # ── Indikator Teknikal ──────────────────────────────────────────
-        # Trend
-        df['ema20']  = ta.ema(df['close'], length=20)
-        df['ema50']  = ta.ema(df['close'], length=50)
+        # Indikator
+        df['ema20']  = ta.trend.ema_indicator(df['close'], window=20)
+        df['ema50']  = ta.trend.ema_indicator(df['close'], window=50)
+        df['rsi']    = ta.momentum.rsi(df['close'], window=14)
+        # ... dst
 
-        # Momentum
-        df['rsi']    = ta.rsi(df['close'], length=14)
-
-        stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
-        if stoch is not None and not stoch.empty:
-            df['stoch_k'] = stoch.iloc[:, 0]
-            df['stoch_d'] = stoch.iloc[:, 1]
-        else:
-            df['stoch_k'] = 50.0
-            df['stoch_d'] = 50.0
-
-        # MACD
-        macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        if macd_df is not None and not macd_df.empty:
-            df['macd']        = macd_df.iloc[:, 0]
-            df['macd_signal'] = macd_df.iloc[:, 1]
-            df['macd_hist']   = macd_df.iloc[:, 2]
-        else:
-            df['macd'] = df['macd_signal'] = df['macd_hist'] = 0.0
-
-        # ATR untuk volatility-based TP/SL
-        atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
-        df['atr']   = atr_series if atr_series is not None else pd.Series(0.0, index=df.index)
-
-        # Volume
-        df['vol_ma']    = ta.sma(df['volume'], length=20)   # window lebih panjang (20 vs 10)
-        df['vol_ratio'] = df['volume'] / df['vol_ma'].replace(0, np.nan)
-
+        logger.info(f"[{symbol}] sebelum dropna: {len(df)} rows")
         df = df.dropna()
+        logger.info(f"[{symbol}] setelah dropna: {len(df)} rows")  # ← cek ini hilang berapa
+
         if df.empty:
+            logger.info(f"[{symbol}] df kosong setelah dropna")
             return None
 
         latest = df.iloc[-1]
-        prev   = df.iloc[-2]
+        logger.info(f"[{symbol}] score sebelum threshold: {score}, threshold: {threshold}")  # ← taruh di akhir scoring
 
-        # ── Liquidity Gate ─────────────────────────────────────────────
-        if latest['volume'] < self.min_volume_abs:
-            logger.debug(f"[{symbol}] Volume terlalu tipis: {latest['volume']:.0f}")
-            return None
-
-        # ── Scoring System ──────────────────────────────────────────────
-        score   = 0
-        reasons = []
-
-        # 1. TREND FILTER (EMA20 vs EMA50) — bobot tinggi
-        if latest['ema20'] > latest['ema50']:
-            score += 20
-            reasons.append("Uptrend EMA20>50")
-
-        # 2. HARGA DI ATAS EMA20 (konfirmasi momentum jangka pendek)
-        if latest['close'] > latest['ema20']:
-            score += 15
-            reasons.append("Harga > EMA20")
-
-        # 3. RSI LOGIC — lebih granular
-        rsi = latest['rsi']
-        if 30 <= rsi <= 45:
-            score += 30         # Oversold recovery — setup terbaik
-            reasons.append(f"RSI Rebound ({rsi:.0f})")
-        elif 45 < rsi <= 60:
-            score += 15         # Neutral bullish momentum
-        elif rsi > 70:
-            score -= 10         # Overbought — penalty
-
-        # 4. STOCHASTIC DOUBLE KONFIRMASI
-        sk, sd = latest['stoch_k'], latest['stoch_d']
-        if sk < 25 and sk > sd:
-            score += 20
-            reasons.append(f"Stoch Bullish Cross ({sk:.0f})")
-        elif sk < 40 and sk > sd:
-            score += 10
-
-        # 5. MACD CROSSOVER / MOMENTUM
-        if latest['macd'] > latest['macd_signal'] and prev['macd'] <= prev['macd_signal']:
-            score += 20
-            reasons.append("MACD Golden Cross")
-        elif latest['macd'] > latest['macd_signal']:
-            score += 10
-            reasons.append("MACD Bullish")
-        if latest['macd_hist'] > 0 and latest['macd_hist'] > prev['macd_hist']:
-            score += 5          # Histogram menguat
-
-        # 6. VOLUME SPIKE
-        vol_ratio = latest['vol_ratio']
-        if vol_ratio > 2.0:
-            score += 25
-            reasons.append(f"Volume Spike {vol_ratio:.1f}x")
-        elif vol_ratio > 1.5:
-            score += 15
-            reasons.append(f"Volume Naik {vol_ratio:.1f}x")
-
-        # 7. CANDLESTICK PATTERN
-        pattern_name, pattern_score = StockAnalyzer._detect_candle_pattern(df)
-        if pattern_score > 0:
-            score += pattern_score
-            reasons.append(pattern_name)
-
-        # 8. MARKET CONDITION MULTIPLIER
-        market = _market_condition = StockAnalyzer._market_condition(df)
-        if market == 'trending_up':
-            score = int(score * 1.1)    # Bonus 10% di trending market
-        elif market == 'sideways':
-            score = int(score * 0.85)   # Penalty 15% di sideways (rawan false signal)
-        elif market == 'trending_down':
-            score = int(score * 0.70)   # Penalty besar — counter-trend trading berisiko
-
-        # 9. PRICE ACTION vs PREVIOUS CLOSE
-        change_pct = round(((latest['close'] - prev['close']) / prev['close']) * 100, 2)
-        if 0.5 < change_pct < 3.0:
-            score += 10         # Gerak sehat, tidak terlalu cepat
-        elif change_pct > 5.0:
-            score -= 5          # Sudah terlalu banyak naik, FOMO risk
-
-        # ── Threshold Filter ────────────────────────────────────────────
         if score < threshold:
+            logger.info(f"[{symbol}] TIDAK LOLOS threshold ({score} < {threshold})")
             return None
 
-        # ── TP/SL Berbasis ATR (volatility-adjusted) ────────────────────
-        price = round(float(latest['close']), 2)
-        atr   = round(float(latest['atr']), 2)
-
-        # ATR multiplier: TP = 2x ATR, SL = 1.5x ATR → RRR >= 1:1.33
-        tp_distance = max(atr * 2.0, price * 0.02)   # minimum 2% TP
-        sl_distance = max(atr * 1.5, price * 0.015)  # minimum 1.5% SL
-
-        tp = int(price + tp_distance)
-        sl = int(price - sl_distance)
-
-        # RRR (Risk Reward Ratio)
-        rrr = round(tp_distance / sl_distance, 2)
-
-        alasan = " + ".join(reasons) if reasons else "Momentum Bullish"
-
-        return {
-            'symbol':       symbol.replace('.JK', ''),
-            'price':        int(price),
-            'tp':           tp,
-            'sl':           sl,
-            'rrr':          rrr,            # ← BARU: Risk-Reward Ratio
-            'atr':          atr,            # ← BARU: Average True Range
-            'rsi':          round(rsi, 1),
-            'stoch_k':      round(sk, 1),   # ← BARU: Stochastic %K
-            'macd_hist':    round(float(latest['macd_hist']), 4),  # ← BARU
-            'volume_ratio': round(float(vol_ratio), 1),
-            'volume_real':  int(latest['volume']),
-            'score':        score,
-            'change_pct':   change_pct,
-            'market_cond':  market,         # ← BARU: trending_up/sideways/trending_down
-            'alasan':       alasan,
-        }
+        # Liquidity gate
+        if latest['volume'] < self.min_volume_abs:
+            logger.info(f"[{symbol}] TIDAK LOLOS liquidity gate: volume={latest['volume']}")
+            return None
