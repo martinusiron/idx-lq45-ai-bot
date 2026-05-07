@@ -17,9 +17,9 @@ echo "📥 Install ta secara eksplisit (pastikan tidak terlewat)..."
 pip install ta --quiet
 
 echo "✅ Verifikasi library..."
-python3 -c "import ta; print(f'  ta version: {ta.__version__}')"
-python3 -c "import yfinance; print(f'  yfinance version: {yfinance.__version__}')"
-python3 -c "import pandas; print(f'  pandas version: {pandas.__version__}')"
+python3 -c "import ta; print('  ta: OK')"
+python3 -c "import yfinance; print(f'  yfinance: {yfinance.__version__}')"
+python3 -c "import pandas; print(f'  pandas: {pandas.__version__}')"
 
 echo "🔧 Setup file & service..."
 touch bot.log && chmod 666 bot.log
