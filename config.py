@@ -38,5 +38,5 @@ MIN_RRR     = 1.3               # Risk-Reward Ratio minimum 1:1.3
 MIN_VOLUME_ABS = 5_000_000      # Minimum 5 juta lembar per candle — filter saham tipis
 
 # ── Analyzer Timeframe ────────────────────────────────────────────────────────
-DATA_PERIOD   = '2mo'           # 2 bulan data untuk warm-up indikator
+DATA_PERIOD   = '59d'           # MAKS 59 hari — Yahoo Finance batasi 15m data hanya 60 hari terakhir
 DATA_INTERVAL = '15m'           # Interval 15 menit (sesuai untuk day trading IDX)
