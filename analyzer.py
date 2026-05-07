@@ -29,10 +29,12 @@ class StockAnalyzer:
     # ------------------------------------------------------------------ #
     #  DATA FETCHING
     # ------------------------------------------------------------------ #
-    def fetch_data(self, symbol: str, period: str = '2mo', interval: str = '15m') -> pd.DataFrame | None:
+    def fetch_data(self, symbol: str, period: str = '59d', interval: str = '15m') -> pd.DataFrame | None:
         """
         Fetch OHLCV data dari Yahoo Finance.
-        Period dinaikkan ke 2mo agar EMA50 & MACD punya cukup warm-up data.
+        PENTING: Yahoo Finance membatasi data 15m hanya untuk 60 hari terakhir.
+        Gunakan '59d' (bukan '2mo') karena '2mo' bisa dihitung ~61 hari dan
+        menyebabkan error "startTime out of range" untuk semua saham.
         """
         try:
             ticker = f"{symbol}.JK" if not symbol.endswith('.JK') else symbol
