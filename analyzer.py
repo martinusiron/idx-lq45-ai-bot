@@ -30,33 +30,29 @@ class StockAnalyzer:
     #  DATA FETCHING
     # ------------------------------------------------------------------ #
     def fetch_data(self, symbol: str, period: str = '59d', interval: str = '15m') -> pd.DataFrame | None:
-        """
-        Fetch OHLCV data dari Yahoo Finance.
-        PENTING: Yahoo Finance membatasi data 15m hanya untuk 60 hari terakhir.
-        Gunakan '59d' (bukan '2mo') karena '2mo' bisa dihitung ~61 hari dan
-        menyebabkan error "startTime out of range" untuk semua saham.
-        """
         try:
             ticker = f"{symbol}.JK" if not symbol.endswith('.JK') else symbol
             df = yf.download(ticker, period=period, interval=interval,
-                             progress=False, auto_adjust=True)
+                            progress=False, auto_adjust=True)
+            
+            logger.info(f"[{symbol}] df.empty={df.empty}, len={len(df)}")  # ← TAMBAH INI
+            
             if df.empty:
                 return None
 
-            # Flatten MultiIndex jika ada
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
-            # Rename kolom lowercase supaya konsisten
             df.columns = [c.lower() for c in df.columns]
+
+            logger.info(f"[{symbol}] columns={list(df.columns)}, rows={len(df)}, min_required={self.min_data_points}")  # ← TAMBAH INI
 
             if len(df) < self.min_data_points:
                 return None
 
             return df
-
         except Exception as e:
-            logger.error(f"[{symbol}] Data fetch error: {e}")
+            logger.error(f"Data fetch error {symbol}: {e}")
             return None
 
     # ------------------------------------------------------------------ #
