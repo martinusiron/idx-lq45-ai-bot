@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Defaults
 from analyzer import StockAnalyzer
 from notifier import TelegramFormatter
+from global_macro import GlobalMacroAnalyzer
 from config import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, LQ45_SYMBOLS,
     HIGH_PROB_THRESHOLD, MIN_RRR, MARKET_OPEN, MARKET_CLOSE
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 class IDXDayTraderBot:
     def __init__(self):
         self.analyzer  = StockAnalyzer()
+        self.macro     = GlobalMacroAnalyzer()
         self.tz        = pytz.timezone('Asia/Jakarta')
         self.formatter = TelegramFormatter()
 
@@ -34,7 +36,6 @@ class IDXDayTraderBot:
         return MARKET_OPEN <= now.hour < MARKET_CLOSE + 1
 
     def _analyze_one(self, sym: str, threshold: int) -> dict | None:
-        """Wrapper sync untuk dijalankan di thread pool."""
         try:
             res = self.analyzer.analyze(sym, threshold=threshold)
             if res and res.get('rrr', 0) >= MIN_RRR:
@@ -44,11 +45,7 @@ class IDXDayTraderBot:
         return None
 
     async def _scan_symbols_async(self, symbols: list[str], threshold: int) -> list[dict]:
-        """
-        Scan semua simbol secara concurrent menggunakan thread pool.
-        Jauh lebih cepat dari sequential — 65 saham ~10-15 detik vs ~60 detik.
-        """
-        loop = asyncio.get_event_loop()
+        loop  = asyncio.get_event_loop()
         tasks = [
             loop.run_in_executor(None, self._analyze_one, sym, threshold)
             for sym in symbols
@@ -57,36 +54,53 @@ class IDXDayTraderBot:
         signals = [r for r in results if r is not None]
         return sorted(signals, key=lambda x: x['score'], reverse=True)
 
+    async def _get_macro_async(self) -> dict:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.macro.get_macro_context)
+
     # ------------------------------------------------------------------ #
     #  SCHEDULER JOBS
     # ------------------------------------------------------------------ #
     async def job_morning_signal(self, context: ContextTypes.DEFAULT_TYPE):
         logger.info("🌅 Job pagi: mencari sinyal...")
         try:
-            signals = await self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
+            # Fetch macro & scan saham secara paralel
+            macro_task  = self._get_macro_async()
+            signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
+            macro, signals = await asyncio.gather(macro_task, signal_task)
+
+            # Filter global: kalau risk-off, turunkan threshold skor
+            is_risk_off, risk_reasons = self.macro.check_risk_off()
+            if is_risk_off:
+                logger.warning(f"⚠️ RISK-OFF terdeteksi: {risk_reasons}")
+
             if signals:
                 context.bot_data['morning_signals'] = signals
-                msg = self.formatter.format_morning_signal(signals)
+                msg = self.formatter.format_morning_signal(signals, macro=macro)
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML'
                 )
-                logger.info(f"Sinyal pagi dikirim: {len(signals)} saham lolos.")
             else:
+                # Tetap kirim kondisi makro meski tidak ada sinyal
+                macro_msg = self.formatter.format_macro_context(macro)
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
-                    text="📭 Tidak ada setup yang memenuhi kriteria pagi ini (Skor ≥ 75 & RRR ≥ 1.3)."
+                    text=f"📭 Tidak ada sinyal hari ini.\n\n{macro_msg}",
+                    parse_mode='HTML'
                 )
         except Exception as e:
             logger.error(f"job_morning_signal error: {e}")
 
     async def job_afternoon_update(self, context: ContextTypes.DEFAULT_TYPE):
-        logger.info("🌇 Job sore: membuat update P/L...")
+        logger.info("🌇 Job sore: update P/L...")
         try:
             morning_signals = context.bot_data.get('morning_signals', [])
             if not morning_signals:
                 return
 
-            updates = []
+            macro_task   = self._get_macro_async()
+            updates      = []
+
             for s in morning_signals:
                 try:
                     res = self.analyzer.analyze(s['symbol'], threshold=0)
@@ -100,8 +114,10 @@ class IDXDayTraderBot:
                 except Exception as e:
                     logger.warning(f"[{s['symbol']}] update sore error: {e}")
 
+            macro = await macro_task
+
             if updates:
-                msg = self.formatter.format_afternoon_update(updates)
+                msg = self.formatter.format_afternoon_update(updates, macro=macro)
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML'
                 )
@@ -120,6 +136,7 @@ class IDXDayTraderBot:
             "/update     — Status profit/loss sinyal hari ini\n"
             "/detail &lt;KODE&gt; — Analisa mendalam satu saham\n"
             "/top        — Saham paling aktif di LQ45\n"
+            "/macro      — Kondisi makro global hari ini\n"
             "/watchlist  — Lihat daftar pantau kamu\n"
             "/watch &lt;KODE&gt; — Tambah saham ke watchlist\n"
             "/unwatch &lt;KODE&gt; — Hapus dari watchlist\n"
@@ -127,6 +144,17 @@ class IDXDayTraderBot:
             "<i>⚠️ Bukan ajakan/rekomendasi finansial.</i>"
         )
         await update.message.reply_text(intro, parse_mode='HTML')
+
+    async def cmd_macro(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Command /macro — tampilkan kondisi makro global standalone."""
+        await update.message.reply_text("🌍 Mengambil data makro global...")
+        try:
+            macro = await self._get_macro_async()
+            msg   = self.formatter.format_macro_standalone(macro)
+            await update.message.reply_text(msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"cmd_macro error: {e}")
+            await update.message.reply_text("⚠️ Gagal mengambil data makro. Coba lagi sesaat.")
 
     async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_market_hours():
@@ -136,17 +164,22 @@ class IDXDayTraderBot:
             )
             return
 
-        await update.message.reply_text("🔎 Menganalisa LQ45 secara paralel, mohon tunggu ~15 detik...")
-        signals = await self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
+        await update.message.reply_text("🔎 Menganalisa LQ45 + makro global, mohon tunggu ~15 detik...")
+
+        macro_task  = self._get_macro_async()
+        signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
+        macro, signals = await asyncio.gather(macro_task, signal_task)
 
         if signals:
             context.bot_data['morning_signals'] = signals
-            msg = self.formatter.format_morning_signal(signals)
+            msg = self.formatter.format_morning_signal(signals, macro=macro)
             await update.message.reply_text(msg, parse_mode='HTML')
         else:
+            macro_msg = self.formatter.format_macro_context(macro)
             await update.message.reply_text(
-                f"📭 Belum ada setup yang memenuhi kriteria saat ini\n"
-                f"(Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR})."
+                f"📭 Tidak ada setup yang memenuhi kriteria saat ini\n"
+                f"(Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR}).\n\n{macro_msg}",
+                parse_mode='HTML'
             )
 
     async def cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,8 +190,11 @@ class IDXDayTraderBot:
             )
             return
 
-        await update.message.reply_text("⏳ Menghitung Profit/Loss hari ini...")
-        updates = []
+        await update.message.reply_text("⏳ Menghitung P/L + update makro...")
+
+        macro_task = self._get_macro_async()
+        updates    = []
+
         for s in signals:
             try:
                 res = self.analyzer.analyze(s['symbol'], threshold=0)
@@ -172,8 +208,10 @@ class IDXDayTraderBot:
             except Exception as e:
                 logger.warning(f"[{s['symbol']}] cmd_update error: {e}")
 
+        macro = await macro_task
+
         if updates:
-            msg = self.formatter.format_afternoon_update(updates)
+            msg = self.formatter.format_afternoon_update(updates, macro=macro)
             await update.message.reply_text(msg, parse_mode='HTML')
         else:
             await update.message.reply_text("Gagal mengambil data terkini. Coba lagi sesaat.")
@@ -184,27 +222,35 @@ class IDXDayTraderBot:
             return
 
         symbol = context.args[0].upper().replace('.JK', '')
-        await update.message.reply_text(f"🔬 Menganalisa {symbol}...")
+        await update.message.reply_text(f"🔬 Menganalisa {symbol} + kondisi makro...")
 
         try:
             loop = asyncio.get_event_loop()
-            res  = await loop.run_in_executor(None, self.analyzer.analyze, symbol, 0)
+            macro_task  = self._get_macro_async()
+            stock_task  = loop.run_in_executor(None, self.analyzer.analyze, symbol, 0)
+            macro, res  = await asyncio.gather(macro_task, stock_task)
+
             if res:
-                msg = self.formatter.format_detail(res)
+                msg = self.formatter.format_detail(res, macro=macro)
                 await update.message.reply_text(msg, parse_mode='HTML')
             else:
+                # Tetap tampilkan makro meski saham tidak ada datanya
+                macro_msg = self.formatter.format_macro_context(macro)
                 await update.message.reply_text(
-                    f"❌ Data {symbol} tidak ditemukan atau tidak cukup.\n"
-                    "Pastikan kode saham benar (contoh: BBCA, TLKM, GOTO)."
+                    f"❌ Data {symbol} tidak cukup untuk dianalisa.\n\n{macro_msg}",
+                    parse_mode='HTML'
                 )
         except Exception as e:
             logger.error(f"cmd_detail [{symbol}] error: {e}")
             await update.message.reply_text(f"⚠️ Terjadi error saat menganalisa {symbol}.")
 
     async def cmd_top(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("📊 Memindai LQ45 secara paralel, mohon tunggu ~15 detik...")
+        await update.message.reply_text("📊 Memindai LQ45 + makro global, mohon tunggu ~15 detik...")
         try:
-            all_data = await self._scan_symbols_async(LQ45_SYMBOLS, threshold=0)
+            macro_task  = self._get_macro_async()
+            signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=0)
+            macro, all_data = await asyncio.gather(macro_task, signal_task)
+
             if not all_data:
                 await update.message.reply_text("Gagal mendapatkan data. Coba beberapa saat lagi.")
                 return
@@ -212,7 +258,7 @@ class IDXDayTraderBot:
             top_vol     = sorted(all_data, key=lambda x: x['volume_ratio'], reverse=True)[:3]
             top_gainers = sorted(all_data, key=lambda x: x['change_pct'],   reverse=True)[:3]
 
-            msg = self.formatter.format_top(top_vol, top_gainers)
+            msg = self.formatter.format_top(top_vol, top_gainers, macro=macro)
             await update.message.reply_text(msg, parse_mode='HTML')
         except Exception as e:
             logger.error(f"cmd_top error: {e}")
@@ -288,6 +334,7 @@ class IDXDayTraderBot:
         app.add_handler(CommandHandler("update",    self.cmd_update))
         app.add_handler(CommandHandler("detail",    self.cmd_detail))
         app.add_handler(CommandHandler("top",       self.cmd_top))
+        app.add_handler(CommandHandler("macro",     self.cmd_macro))
         app.add_handler(CommandHandler("watch",     self.cmd_watch))
         app.add_handler(CommandHandler("unwatch",   self.cmd_unwatch))
         app.add_handler(CommandHandler("watchlist", self.cmd_watchlist))
