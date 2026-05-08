@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import logging
+from config import RISK_OFF_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class GlobalMacroAnalyzer:
             'data':     data,
             'warnings': warnings,
             'is_risk_off': len(warnings) >= 2,  # risk-off jika 2+ warning aktif
+            'risk_mode': RISK_OFF_MODE,
         }
 
     def check_risk_off(self) -> tuple[bool, list[str]]:

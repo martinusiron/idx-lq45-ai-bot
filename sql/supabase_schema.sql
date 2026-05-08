@@ -1,0 +1,42 @@
+create table if not exists public.trades (
+    trade_date text not null,
+    symbol text not null,
+    signal_timestamp text not null,
+    market_price_at_signal double precision not null,
+    planned_entry double precision not null,
+    sl double precision not null,
+    tp1 double precision not null,
+    tp2 double precision not null,
+    rrr double precision not null,
+    score double precision not null,
+    risk_off boolean not null default false,
+    qty integer not null,
+    lot_count integer not null,
+    risk_amount double precision not null,
+    planned_notional double precision not null,
+    size_mode text not null,
+    size_notes text not null,
+    analyzer_snapshot text not null,
+    status text not null,
+    fill_status text not null default 'PENDING',
+    filled_at text,
+    filled_price double precision,
+    last_price double precision,
+    exit_price double precision,
+    exit_reason text,
+    pnl_amount double precision default 0,
+    pnl_pct double precision default 0,
+    realized_r double precision default 0,
+    events text,
+    finalized boolean not null default false,
+    created_at text not null,
+    updated_at text not null,
+    primary key (trade_date, symbol)
+);
+
+create table if not exists public.watchlists (
+    user_id text not null,
+    symbol text not null,
+    created_at text not null,
+    primary key (user_id, symbol)
+);

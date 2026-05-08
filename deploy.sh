@@ -20,6 +20,8 @@ echo "✅ Verifikasi library..."
 python3 -c "import ta; print('  ta: OK')"
 python3 -c "import yfinance; print(f'  yfinance: {yfinance.__version__}')"
 python3 -c "import pandas; print(f'  pandas: {pandas.__version__}')"
+python3 -c "import psycopg; print(f'  psycopg: {psycopg.__version__}')"
+python3 -c "import requests; print(f'  requests: {requests.__version__}')"
 
 echo "🔧 Setup file & service..."
 touch bot.log && chmod 666 bot.log

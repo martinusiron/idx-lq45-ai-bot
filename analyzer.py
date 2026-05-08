@@ -3,6 +3,7 @@ import ta
 import pandas as pd
 import numpy as np
 import logging
+from config import DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,12 @@ class StockAnalyzer:
     # ------------------------------------------------------------------ #
     #  DATA FETCHING
     # ------------------------------------------------------------------ #
-    def fetch_data(self, symbol: str, period: str = '59d', interval: str = '15m') -> pd.DataFrame | None:
+    def fetch_data(
+        self,
+        symbol: str,
+        period: str = DATA_PERIOD,
+        interval: str = DATA_INTERVAL
+    ) -> pd.DataFrame | None:
         """
         Fetch OHLCV dari Yahoo Finance.
         PENTING: '59d' bukan '2mo' — Yahoo Finance batasi 15m hanya 60 hari.
@@ -346,6 +352,12 @@ class StockAnalyzer:
         if strict_filter and vol_ratio < self.min_volume_ratio:
             logger.info(f"[{symbol}] TIDAK LOLOS liquidity gate: vol_ratio={vol_ratio:.2f}")
             return None
+        if strict_filter and float(latest['volume']) < MIN_VOLUME_ABS:
+            logger.info(
+                f"[{symbol}] TIDAK LOLOS absolute volume gate: "
+                f"volume={float(latest['volume']):.0f} < {MIN_VOLUME_ABS}"
+            )
+            return None
 
         # ── ADX Filter — skip jika market terlalu sideways ─────────────
         adx = latest['adx']
@@ -530,6 +542,7 @@ class StockAnalyzer:
 
         return {
             'symbol':           symbol.replace('.JK', ''),
+            'signal_timestamp': latest.name.isoformat(),
             'price':            int(price),          # Harga pasar saat ini
             'best_entry':       best_entry,          # ← BARU: zona entry ideal
             'entry_type':       entry_type,          # ← BARU: market/vwap/support/bb_low

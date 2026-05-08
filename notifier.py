@@ -13,6 +13,7 @@ class TelegramFormatter:
         data        = macro.get('data', {})
         warnings    = macro.get('warnings', [])
         is_risk_off = macro.get('is_risk_off', False)
+        risk_mode   = macro.get('risk_mode', 'normal')
 
         type_emoji = {
             'index':     '📊',
@@ -37,7 +38,8 @@ class TelegramFormatter:
                 msg += f"  • {w}\n"
 
         if is_risk_off:
-            msg += "\n🚨 <b>KONDISI RISK-OFF</b> — pertimbangkan posisi lebih kecil\n"
+            mode_text = "ukuran posisi diperkecil" if risk_mode == "reduce" else "trade baru diblokir"
+            msg += f"\n🚨 <b>KONDISI RISK-OFF</b> — {mode_text}\n"
         else:
             msg += "\n✅ Kondisi makro relatif kondusif\n"
 
@@ -82,10 +84,13 @@ class TelegramFormatter:
                 f"TP2 (runner) : Rp {tp2:,}  <i>(+{tp2_pct}%)</i>\n"
                 f"SL (swing)   : Rp {sl:,}  <i>(-{sl_pct}%)</i>\n"
                 f"RRR   : <b>1 : {s.get('rrr', 'N/A')}</b>\n"
+                f"Ukuran Posisi: <b>{s.get('lot_count', 0):,} lot</b> / {s.get('qty', 0):,} saham\n"
+                f"Notional: Rp {int(s.get('planned_notional', 0)):,} | Risk: Rp {int(s.get('risk_amount', 0)):,}\n"
                 f"Skor  : {s['score']}/100\n"
                 f"RSI {s['rsi']} | Stoch {s.get('stoch_k','—')} | ADX {s.get('adx','—')} | OBV {obv}\n"
                 f"Vol {s['volume_ratio']}x | VWAP {'✅' if s['price'] > s.get('vwap', 0) else '⚠️'} | S/R: {s.get('support','-'):,}/{s.get('resistance','-'):,}\n"
                 f"<i>{s['alasan']}</i>\n"
+                f"<i>{s.get('size_notes', '')}</i>\n"
                 f"{'━'*22}\n\n"
             )
 
@@ -96,34 +101,46 @@ class TelegramFormatter:
     #  AFTERNOON UPDATE
     # ------------------------------------------------------------------ #
     @staticmethod
-    def format_afternoon_update(updates: list[dict]) -> str:
+    def format_afternoon_update(updates: list[dict], summary: dict | None = None) -> str:
         msg = "📊 <b>UPDATE SORE — Hasil Hari Ini</b>\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        total_pnl = sum(u['pnl'] for u in updates)
+        total_pnl_amount = sum(u.get('pnl_amount', 0) for u in updates)
+        total_r = sum(u.get('realized_r', 0) for u in updates)
 
         for u in updates:
-            pnl = u['pnl']
-            if pnl >= 2.0:
-                status = "✅ PROFIT"
-                bar    = "🟢" * min(int(pnl), 5)
-            elif pnl <= -1.5:
-                status = "🔴 LOSS"
-                bar    = "🔴" * min(int(abs(pnl)), 5)
+            pnl_pct = u.get('pnl_pct', 0)
+            fill_status = u.get('fill_status', 'PENDING')
+            status_code = u.get('status', 'OPEN')
+            if fill_status == "UNFILLED":
+                status = "⚪ NO FILL"
+                bar = "⚪"
+            elif pnl_pct >= 2.0:
+                status = f"✅ {status_code}"
+                bar = "🟢" * min(max(int(pnl_pct), 1), 5)
+            elif pnl_pct <= -1.0:
+                status = f"🔴 {status_code}"
+                bar = "🔴" * min(max(int(abs(pnl_pct)), 1), 5)
             else:
-                status = "⏳ HOLD"
-                bar    = "🟡"
+                status = f"🟡 {status_code}"
+                bar = "🟡"
 
-            sign = "+" if pnl > 0 else ""
+            sign = "+" if pnl_pct > 0 else ""
             msg += (
                 f"<b>{u['symbol']}</b>  →  {status}\n"
-                f"Harga : Rp {u['current_price']:,}  ({sign}{pnl}%)\n"
+                f"Entry Plan: Rp {int(u.get('planned_entry', 0)):,} | Last: Rp {int(u.get('last_price', 0)):,}\n"
+                f"P/L: Rp {int(u.get('pnl_amount', 0)):,}  ({sign}{pnl_pct}%) | {u.get('realized_r', 0):+.2f}R\n"
+                f"Events: {u.get('events', '-')} | {u.get('exit_reason', '-')}\n"
                 f"{bar}\n\n"
             )
 
-        sign_total = "+" if total_pnl > 0 else ""
         msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"<b>Net Hari Ini: {sign_total}{total_pnl:.2f}%</b>\n"
+        msg += f"<b>Net Hari Ini: Rp {int(total_pnl_amount):,} | {total_r:+.2f}R</b>\n"
+        if summary:
+            msg += (
+                f"Win/Loss: {summary.get('winners', 0)}/{summary.get('losers', 0)} | "
+                f"Unfilled: {summary.get('unfilled', 0)}\n"
+            )
         return msg
 
     # ------------------------------------------------------------------ #
