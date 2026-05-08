@@ -55,21 +55,36 @@ class TelegramFormatter:
         msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         for i, s in enumerate(top, 1):
-            tp_pct = round((s['tp'] - s['price']) / s['price'] * 100, 1)
-            sl_pct = round((s['price'] - s['sl']) / s['price'] * 100, 1)
-            cond   = mkt_emoji.get(s.get('market_cond', ''), '❓')
-            obv    = "✅" if s.get('obv_ok') else "⚠️"
-            sup    = "🛡️" if s.get('near_support') else ""
+            cond     = mkt_emoji.get(s.get('market_cond', ''), '❓')
+            obv      = "✅" if s.get('obv_ok') else "⚠️"
+            sup      = "🛡️" if s.get('near_support') else ""
+            entry    = s.get('best_entry', s['price'])
+            etype    = s.get('entry_type', 'market')
+            tp1      = s.get('tp1', s.get('tp', 0))
+            tp2      = s.get('tp2', 0)
+            sl       = s['sl']
+            tp1_pct  = round((tp1 - entry) / entry * 100, 1) if entry > 0 else 0
+            tp2_pct  = round((tp2 - entry) / entry * 100, 1) if entry > 0 and tp2 > 0 else 0
+            sl_pct   = round((entry - sl) / entry * 100, 1) if entry > 0 else 0
+
+            entry_label = {
+                'market':  '🟡 Market (agresif)',
+                'vwap':    '🔵 VWAP Pullback',
+                'support': '🟢 Dekat Support',
+                'bb_low':  '🟢 Lower BB',
+            }.get(etype, '🟡 Market')
 
             msg += (
                 f"<b>{i}. ${s['symbol']}</b>  {cond} {sup}\n"
-                f"Entry : <b>Rp {s['price']:,}</b>\n"
-                f"TP    : Rp {s['tp']:,}  <i>(+{tp_pct}%)</i>\n"
-                f"SL    : Rp {s['sl']:,}  <i>(-{sl_pct}%)</i>\n"
+                f"Harga Pasar : Rp {s['price']:,}\n"
+                f"Best Entry  : <b>Rp {entry:,}</b>  ({entry_label})\n"
+                f"TP1 (parsial): Rp {tp1:,}  <i>(+{tp1_pct}%)</i>\n"
+                f"TP2 (runner) : Rp {tp2:,}  <i>(+{tp2_pct}%)</i>\n"
+                f"SL (swing)   : Rp {sl:,}  <i>(-{sl_pct}%)</i>\n"
                 f"RRR   : <b>1 : {s.get('rrr', 'N/A')}</b>\n"
                 f"Skor  : {s['score']}/100\n"
                 f"RSI {s['rsi']} | Stoch {s.get('stoch_k','—')} | ADX {s.get('adx','—')} | OBV {obv}\n"
-                f"Vol {s['volume_ratio']}x | VWAP {'✅' if s['price'] > s.get('vwap', 0) else '⚠️'}\n"
+                f"Vol {s['volume_ratio']}x | VWAP {'✅' if s['price'] > s.get('vwap', 0) else '⚠️'} | S/R: {s.get('support','-'):,}/{s.get('resistance','-'):,}\n"
                 f"<i>{s['alasan']}</i>\n"
                 f"{'━'*22}\n\n"
             )
@@ -128,8 +143,15 @@ class TelegramFormatter:
         else:
             rek, rek_emoji = "AVOID",      "🚫"
 
-        tp_pct = round((s['tp'] - s['price']) / s['price'] * 100, 1)
-        sl_pct = round((s['price'] - s['sl']) / s['price'] * 100, 1)
+        entry    = s.get('best_entry', s['price'])
+        etype    = s.get('entry_type', 'market')
+        tp1      = s.get('tp1', s.get('tp', 0))
+        tp2      = s.get('tp2', 0)
+        sl       = s['sl']
+        tp1_pct  = round((tp1 - entry) / entry * 100, 1) if entry > 0 else 0
+        tp2_pct  = round((tp2 - entry) / entry * 100, 1) if entry > 0 and tp2 > 0 else 0
+        sl_pct   = round((entry - sl) / entry * 100, 1) if entry > 0 else 0
+
         cond_map = {
             'trending_up':   'Uptrend 📈',
             'sideways':      'Sideways ➡️',
@@ -138,28 +160,37 @@ class TelegramFormatter:
         cond    = cond_map.get(s.get('market_cond', ''), 'Unknown')
         vwap_ok = s['price'] > s.get('vwap', 0)
 
+        entry_label = {
+            'market':  '🟡 Market (agresif)',
+            'vwap':    '🔵 VWAP Pullback',
+            'support': '🟢 Dekat Support',
+            'bb_low':  '🟢 Lower BB',
+        }.get(etype, '🟡 Market')
+
         msg = (
             f"📊 <b>Analisa: {s['symbol']}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Harga      : Rp {s['price']:,}\n"
-            f"Volume     : {vol_m} ({s['volume_ratio']}x rata-rata)\n"
-            f"Pergerakan : {'+' if s['change_pct'] > 0 else ''}{s['change_pct']}%\n\n"
+            f"Harga Pasar  : Rp {s['price']:,}\n"
+            f"Volume       : {vol_m} ({s['volume_ratio']}x rata-rata)\n"
+            f"Pergerakan   : {'+' if s['change_pct'] > 0 else ''}{s['change_pct']}%\n\n"
             f"<b>Indikator Teknikal:</b>\n"
-            f"  RSI (14)     : {s['rsi']} {'🔥' if s['rsi'] < 40 else '✅' if s['rsi'] < 60 else '⚠️'}\n"
-            f"  Stochastic   : {s.get('stoch_k', 'N/A')}\n"
-            f"  MACD Hist    : {s.get('macd_hist', 'N/A')}\n"
-            f"  ADX          : {s.get('adx', 'N/A')} {'💪' if s.get('adx', 0) > 35 else '✅' if s.get('adx', 0) > 25 else '⚠️'}\n"
-            f"  VWAP         : Rp {s.get('vwap', 'N/A'):,}  {'✅ Above' if vwap_ok else '⚠️ Below'}\n"
-            f"  BB %B        : {s.get('bb_pct', 'N/A')} {'(Oversold)' if s.get('bb_pct', 0.5) < 0.2 else ''}\n"
-            f"  OBV          : {'✅ Konfirmasi' if s.get('obv_ok') else '⚠️ Divergence'}\n"
-            f"  Support      : {'🛡️ Dekat Support' if s.get('near_support') else 'Normal'}\n"
-            f"  ATR          : {s.get('atr', 'N/A')}\n"
-            f"  Trend        : {cond}\n\n"
-            f"<b>Setup Trading:</b>\n"
-            f"  Entry : Rp {s['price']:,}\n"
-            f"  TP    : Rp {s['tp']:,} (+{tp_pct}%)\n"
-            f"  SL    : Rp {s['sl']:,} (-{sl_pct}%)\n"
-            f"  RRR   : 1 : {s.get('rrr', 'N/A')}\n\n"
+            f"  RSI (14)   : {s['rsi']} {'🔥' if s['rsi'] < 40 else '✅' if s['rsi'] < 60 else '⚠️'}\n"
+            f"  Stochastic : {s.get('stoch_k', 'N/A')}\n"
+            f"  MACD Hist  : {s.get('macd_hist', 'N/A')}\n"
+            f"  ADX        : {s.get('adx', 'N/A')} {'💪' if s.get('adx', 0) > 35 else '✅' if s.get('adx', 0) > 25 else '⚠️'}\n"
+            f"  VWAP       : Rp {s.get('vwap', 0):,}  {'✅ Above' if vwap_ok else '⚠️ Below'}\n"
+            f"  BB %B      : {s.get('bb_pct', 'N/A')} {'🔥 Oversold' if s.get('bb_pct', 0.5) < 0.2 else ''}\n"
+            f"  OBV        : {'✅ Konfirmasi' if s.get('obv_ok') else '⚠️ Divergence'}\n"
+            f"  Support    : Rp {s.get('support', '-'):,} {'🛡️' if s.get('near_support') else ''}\n"
+            f"  Resistance : Rp {s.get('resistance', '-'):,}\n"
+            f"  ATR        : {s.get('atr', 'N/A')}\n"
+            f"  Trend      : {cond}\n\n"
+            f"<b>🎯 Setup Trading:</b>\n"
+            f"  Best Entry  : <b>Rp {entry:,}</b>  ({entry_label})\n"
+            f"  TP1 (parsial): Rp {tp1:,}  (+{tp1_pct}%)\n"
+            f"  TP2 (runner) : Rp {tp2:,}  (+{tp2_pct}%)\n"
+            f"  SL (swing)   : Rp {sl:,}  (-{sl_pct}%)\n"
+            f"  RRR          : 1 : {s.get('rrr', 'N/A')}\n\n"
             f"Sinyal  : <i>{s['alasan']}</i>\n"
             f"Skor AI : {score}/100\n\n"
             f"<b>Rekomendasi: {rek_emoji} {rek}</b>\n\n"

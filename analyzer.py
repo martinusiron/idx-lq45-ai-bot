@@ -93,16 +93,66 @@ class StockAnalyzer:
     # ------------------------------------------------------------------ #
     #  SUPPORT & RESISTANCE (Pivot-based)
     # ------------------------------------------------------------------ #
+    #  SUPPORT & RESISTANCE — Multi-level pivot detection
+    # ------------------------------------------------------------------ #
     @staticmethod
-    def _find_sr_levels(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
+    def _find_sr_levels(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float, list, list]:
         """
-        Cari support (pivot low) dan resistance (pivot high) dari lookback bar.
-        Return: (support, resistance)
+        Cari S/R menggunakan pivot high/low yang valid (2-bar confirmation).
+        Return: (nearest_support, nearest_resistance, all_supports, all_resistances)
         """
-        recent = df.iloc[-lookback:]
-        support    = float(recent['low'].min())
-        resistance = float(recent['high'].max())
-        return support, resistance
+        recent = df.iloc[-lookback - 4:]
+        price  = float(df['close'].iloc[-1])
+        supports, resistances = [], []
+
+        for i in range(2, len(recent) - 2):
+            low  = recent['low'].iloc[i]
+            high = recent['high'].iloc[i]
+            if (low < recent['low'].iloc[i-1] and low < recent['low'].iloc[i-2]
+                    and low < recent['low'].iloc[i+1] and low < recent['low'].iloc[i+2]):
+                supports.append(round(float(low), 0))
+            if (high > recent['high'].iloc[i-1] and high > recent['high'].iloc[i-2]
+                    and high > recent['high'].iloc[i+1] and high > recent['high'].iloc[i+2]):
+                resistances.append(round(float(high), 0))
+
+        if not supports:
+            supports    = [round(float(recent['low'].min()), 0)]
+        if not resistances:
+            resistances = [round(float(recent['high'].max()), 0)]
+
+        below = [s for s in supports if s < price]
+        nearest_support = max(below) if below else min(supports)
+        above = [r for r in resistances if r > price]
+        nearest_resistance = min(above) if above else max(resistances)
+
+        return nearest_support, nearest_resistance, sorted(supports), sorted(resistances)
+
+    # ------------------------------------------------------------------ #
+    #  BEST ENTRY — Zona entry optimal
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _calc_best_entry(price: float, support: float, vwap: float, bb_lower: float) -> dict:
+        """
+        Entry ideal di area: pullback VWAP, dekat support, atau lower BB.
+        Bukan selalu market price.
+        """
+        candidates = {
+            'market':  round(price, 0),
+            'vwap':    round(vwap * 1.001, 0),
+            'support': round(support * 1.005, 0),
+            'bb_low':  round(bb_lower * 1.002, 0),
+        }
+        # Entry harus di bawah harga sekarang dan tidak lebih dari 3% di bawah
+        valid = {k: v for k, v in candidates.items() if price * 0.97 <= v <= price}
+        if not valid:
+            valid = {'market': round(price, 0)}
+        best_key   = max(valid, key=lambda k: valid[k])
+        best_price = valid[best_key]
+        return {
+            'best_entry':       int(best_price),
+            'entry_type':       best_key,
+            'entry_candidates': {k: int(v) for k, v in candidates.items()},
+        }
 
     # ------------------------------------------------------------------ #
     #  RSI DIVERGENCE
@@ -404,11 +454,11 @@ class StockAnalyzer:
         elif not obv_rising and latest['close'] > prev['close']:
             score -= 10  # Harga naik tapi OBV turun = divergence negatif
 
-        # 13. Support & Resistance
-        support, resistance = StockAnalyzer._find_sr_levels(df)
+        # 13. Support & Resistance (multi-level pivot)
+        support, resistance, all_supports, all_resistances = StockAnalyzer._find_sr_levels(df)
         price_now = float(latest['close'])
-        near_support    = price_now <= support * 1.02      # Dalam 2% dari support
-        near_resistance = price_now >= resistance * 0.98   # Dalam 2% dari resistance
+        near_support    = price_now <= support * 1.02
+        near_resistance = price_now >= resistance * 0.98
         if near_support:
             score += 15
             reasons.append("Dekat Support 🛡️")
@@ -440,41 +490,69 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] TIDAK LOLOS threshold ({score} < {threshold})")
             return None
 
-        # ── TP/SL: gabungan ATR + Fibonacci ───────────────────────────
-        price = round(float(latest['close']), 2)
-        atr   = round(float(latest['atr']), 2)
+        # ── Entry, TP, SL — Professional Grade ────────────────────────
+        price    = round(float(latest['close']), 2)
+        atr      = round(float(latest['atr']), 2)
+        vwap_val = round(float(latest['vwap']), 0)
+        bb_lower = round(float(latest['bb_lower']), 0)
 
-        atr_tp      = price + max(atr * 2.0, price * 0.02)
-        fib_tp      = StockAnalyzer._calc_fib_tp(df, price)
-        # Pakai yang lebih konservatif (lebih rendah) untuk safety
-        tp_price    = min(atr_tp, fib_tp) if fib_tp > price else atr_tp
+        # BEST ENTRY — zona ideal (limit order, bukan market)
+        entry_data = StockAnalyzer._calc_best_entry(price, support, vwap_val, bb_lower)
+        best_entry = entry_data['best_entry']
+        entry_type = entry_data['entry_type']
 
-        sl_distance = max(atr * 1.5, price * 0.015)
-        tp          = int(tp_price)
-        sl          = int(price - sl_distance)
-        rrr         = round((tp - price) / sl_distance, 2)
+        # SL — swing low terdekat - 0.5% buffer (lebih akurat dari ATR flat)
+        swing_sl    = round(support * 0.995, 0)          # Di bawah support terdekat
+        atr_sl      = round(price - atr * 1.5, 0)        # ATR-based fallback
+        sl          = int(max(swing_sl, atr_sl))          # Ambil yang lebih tinggi (lebih ketat)
+        sl_distance = price - sl
+        if sl_distance <= 0:
+            sl_distance = price * 0.015
+
+        # TP1 — resistance terdekat (konservatif, take partial profit)
+        tp1_resistance = round(resistance * 0.995, 0)    # Tepat di bawah resistance
+        tp1_atr        = round(price + atr * 1.5, 0)     # ATR minimum
+        tp1            = int(max(tp1_resistance, tp1_atr))
+
+        # TP2 — Fibonacci 1.618 extension (agresif, biarkan sisa posisi jalan)
+        recent_20      = df.iloc[-20:]
+        swing_low      = float(recent_20['low'].min())
+        swing_high     = float(recent_20['high'].max())
+        fib_tp2        = round(swing_low + (swing_high - swing_low) * 1.618, 0)
+        tp2            = int(fib_tp2) if fib_tp2 > tp1 else int(tp1 * 1.03)
+
+        # RRR dihitung dari best_entry ke TP1
+        entry_to_tp1   = tp1 - best_entry
+        entry_to_sl    = best_entry - sl
+        rrr = round(entry_to_tp1 / entry_to_sl, 2) if entry_to_sl > 0 else 0
 
         alasan = " + ".join(reasons) if reasons else "Momentum Bullish"
 
         return {
-            'symbol':       symbol.replace('.JK', ''),
-            'price':        int(price),
-            'tp':           tp,
-            'sl':           sl,
-            'rrr':          rrr,
-            'atr':          atr,
-            'adx':          round(float(adx), 1),
-            'vwap':         round(float(latest['vwap']), 0),
-            'bb_pct':       round(float(latest['bb_pct']), 2),
-            'rsi':          round(float(rsi), 1),
-            'stoch_k':      round(float(sk), 1),
-            'macd_hist':    round(float(latest['macd_hist']), 4),
-            'obv_ok':       bool(obv_rising),
-            'near_support': bool(near_support),
-            'volume_ratio': round(float(vol_ratio), 1),
-            'volume_real':  int(latest['volume']),
-            'score':        score,
-            'change_pct':   change_pct,
-            'market_cond':  market,
-            'alasan':       alasan,
+            'symbol':           symbol.replace('.JK', ''),
+            'price':            int(price),          # Harga pasar saat ini
+            'best_entry':       best_entry,          # ← BARU: zona entry ideal
+            'entry_type':       entry_type,          # ← BARU: market/vwap/support/bb_low
+            'tp1':              tp1,                 # ← BARU: TP konservatif (resistance)
+            'tp2':              tp2,                 # ← BARU: TP agresif (Fibonacci 1.618)
+            'sl':               sl,                  # SL berbasis swing low
+            'rrr':              rrr,
+            'atr':              atr,
+            'support':          int(support),        # ← BARU: level support
+            'resistance':       int(resistance),     # ← BARU: level resistance
+            'adx':              round(float(adx), 1),
+            'vwap':             int(vwap_val),
+            'bb_pct':           round(float(latest['bb_pct']), 2),
+            'bb_lower':         int(bb_lower),
+            'rsi':              round(float(rsi), 1),
+            'stoch_k':          round(float(sk), 1),
+            'macd_hist':        round(float(latest['macd_hist']), 4),
+            'obv_ok':           bool(obv_rising),
+            'near_support':     bool(near_support),
+            'volume_ratio':     round(float(vol_ratio), 1),
+            'volume_real':      int(latest['volume']),
+            'score':            score,
+            'change_pct':       change_pct,
+            'market_cond':      market,
+            'alasan':           alasan,
         }
