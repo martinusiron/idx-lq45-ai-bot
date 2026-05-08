@@ -58,36 +58,44 @@ class IDXDayTraderBot:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.macro.get_macro_context)
 
+    async def _send_two(self, send_fn, macro: dict, signal_msg: str | None, no_signal_text: str = ""):
+        """
+        Helper: kirim pesan makro dulu, lalu pesan sinyal.
+        Dua pesan terpisah agar tidak timeout karena pesan terlalu panjang.
+        """
+        macro_msg = self.formatter.format_macro_context(macro)
+        await send_fn(macro_msg, parse_mode='HTML')
+
+        if signal_msg:
+            await send_fn(signal_msg, parse_mode='HTML')
+        elif no_signal_text:
+            await send_fn(no_signal_text)
+
     # ------------------------------------------------------------------ #
     #  SCHEDULER JOBS
     # ------------------------------------------------------------------ #
     async def job_morning_signal(self, context: ContextTypes.DEFAULT_TYPE):
         logger.info("🌅 Job pagi: mencari sinyal...")
         try:
-            # Fetch macro & scan saham secara paralel
             macro_task  = self._get_macro_async()
             signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
             macro, signals = await asyncio.gather(macro_task, signal_task)
 
-            # Filter global: kalau risk-off, turunkan threshold skor
             is_risk_off, risk_reasons = self.macro.check_risk_off()
             if is_risk_off:
-                logger.warning(f"⚠️ RISK-OFF terdeteksi: {risk_reasons}")
+                logger.warning(f"⚠️ RISK-OFF: {risk_reasons}")
 
+            async def send(text, **kwargs):
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, **kwargs)
+
+            signal_msg = self.formatter.format_morning_signal(signals) if signals else None
             if signals:
                 context.bot_data['morning_signals'] = signals
-                msg = self.formatter.format_morning_signal(signals, macro=macro)
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML'
-                )
-            else:
-                # Tetap kirim kondisi makro meski tidak ada sinyal
-                macro_msg = self.formatter.format_macro_context(macro)
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
-                    text=f"📭 Tidak ada sinyal hari ini.\n\n{macro_msg}",
-                    parse_mode='HTML'
-                )
+
+            await self._send_two(
+                send, macro, signal_msg,
+                no_signal_text=f"📭 Tidak ada sinyal hari ini (Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR})."
+            )
         except Exception as e:
             logger.error(f"job_morning_signal error: {e}")
 
@@ -98,8 +106,8 @@ class IDXDayTraderBot:
             if not morning_signals:
                 return
 
-            macro_task   = self._get_macro_async()
-            updates      = []
+            macro_task = self._get_macro_async()
+            updates    = []
 
             for s in morning_signals:
                 try:
@@ -116,11 +124,16 @@ class IDXDayTraderBot:
 
             macro = await macro_task
 
+            async def send(text, **kwargs):
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, **kwargs)
+
+            # Pesan 1: makro
+            await send(self.formatter.format_macro_context(macro), parse_mode='HTML')
+
+            # Pesan 2: P/L update
             if updates:
-                msg = self.formatter.format_afternoon_update(updates, macro=macro)
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML'
-                )
+                await send(self.formatter.format_afternoon_update(updates), parse_mode='HTML')
+
             context.bot_data['morning_signals'] = []
         except Exception as e:
             logger.error(f"job_afternoon_update error: {e}")
@@ -146,7 +159,6 @@ class IDXDayTraderBot:
         await update.message.reply_text(intro, parse_mode='HTML')
 
     async def cmd_macro(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Command /macro — tampilkan kondisi makro global standalone."""
         await update.message.reply_text("🌍 Mengambil data makro global...")
         try:
             macro = await self._get_macro_async()
@@ -170,16 +182,21 @@ class IDXDayTraderBot:
         signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD)
         macro, signals = await asyncio.gather(macro_task, signal_task)
 
+        # Pesan 1: makro
+        await update.message.reply_text(
+            self.formatter.format_macro_context(macro), parse_mode='HTML'
+        )
+
+        # Pesan 2: sinyal
         if signals:
             context.bot_data['morning_signals'] = signals
-            msg = self.formatter.format_morning_signal(signals, macro=macro)
-            await update.message.reply_text(msg, parse_mode='HTML')
+            await update.message.reply_text(
+                self.formatter.format_morning_signal(signals), parse_mode='HTML'
+            )
         else:
-            macro_msg = self.formatter.format_macro_context(macro)
             await update.message.reply_text(
                 f"📭 Tidak ada setup yang memenuhi kriteria saat ini\n"
-                f"(Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR}).\n\n{macro_msg}",
-                parse_mode='HTML'
+                f"(Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR})."
             )
 
     async def cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,9 +227,16 @@ class IDXDayTraderBot:
 
         macro = await macro_task
 
+        # Pesan 1: makro
+        await update.message.reply_text(
+            self.formatter.format_macro_context(macro), parse_mode='HTML'
+        )
+
+        # Pesan 2: P/L
         if updates:
-            msg = self.formatter.format_afternoon_update(updates, macro=macro)
-            await update.message.reply_text(msg, parse_mode='HTML')
+            await update.message.reply_text(
+                self.formatter.format_afternoon_update(updates), parse_mode='HTML'
+            )
         else:
             await update.message.reply_text("Gagal mengambil data terkini. Coba lagi sesaat.")
 
@@ -225,20 +249,25 @@ class IDXDayTraderBot:
         await update.message.reply_text(f"🔬 Menganalisa {symbol} + kondisi makro...")
 
         try:
-            loop = asyncio.get_event_loop()
-            macro_task  = self._get_macro_async()
-            stock_task  = loop.run_in_executor(None, self.analyzer.analyze, symbol, 0)
-            macro, res  = await asyncio.gather(macro_task, stock_task)
+            loop       = asyncio.get_event_loop()
+            macro_task = self._get_macro_async()
+            stock_task = loop.run_in_executor(None, self.analyzer.analyze, symbol, 0)
+            macro, res = await asyncio.gather(macro_task, stock_task)
 
+            # Pesan 1: makro
+            await update.message.reply_text(
+                self.formatter.format_macro_context(macro), parse_mode='HTML'
+            )
+
+            # Pesan 2: detail saham
             if res:
-                msg = self.formatter.format_detail(res, macro=macro)
-                await update.message.reply_text(msg, parse_mode='HTML')
-            else:
-                # Tetap tampilkan makro meski saham tidak ada datanya
-                macro_msg = self.formatter.format_macro_context(macro)
                 await update.message.reply_text(
-                    f"❌ Data {symbol} tidak cukup untuk dianalisa.\n\n{macro_msg}",
-                    parse_mode='HTML'
+                    self.formatter.format_detail(res), parse_mode='HTML'
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Data {symbol} tidak cukup untuk dianalisa.\n"
+                    "Pastikan kode saham benar (contoh: BBCA, TLKM, GOTO)."
                 )
         except Exception as e:
             logger.error(f"cmd_detail [{symbol}] error: {e}")
@@ -251,15 +280,21 @@ class IDXDayTraderBot:
             signal_task = self._scan_symbols_async(LQ45_SYMBOLS, threshold=0)
             macro, all_data = await asyncio.gather(macro_task, signal_task)
 
+            # Pesan 1: makro
+            await update.message.reply_text(
+                self.formatter.format_macro_context(macro), parse_mode='HTML'
+            )
+
+            # Pesan 2: top saham
             if not all_data:
                 await update.message.reply_text("Gagal mendapatkan data. Coba beberapa saat lagi.")
                 return
 
             top_vol     = sorted(all_data, key=lambda x: x['volume_ratio'], reverse=True)[:3]
             top_gainers = sorted(all_data, key=lambda x: x['change_pct'],   reverse=True)[:3]
-
-            msg = self.formatter.format_top(top_vol, top_gainers, macro=macro)
-            await update.message.reply_text(msg, parse_mode='HTML')
+            await update.message.reply_text(
+                self.formatter.format_top(top_vol, top_gainers), parse_mode='HTML'
+            )
         except Exception as e:
             logger.error(f"cmd_top error: {e}")
             await update.message.reply_text("⚠️ Terjadi error saat memindai saham.")
@@ -269,8 +304,8 @@ class IDXDayTraderBot:
         if not context.args:
             await update.message.reply_text("⚠️ Format: /watch BBCA")
             return
-        symbol   = context.args[0].upper().replace('.JK', '')
-        user_id  = str(update.effective_user.id)
+        symbol    = context.args[0].upper().replace('.JK', '')
+        user_id   = str(update.effective_user.id)
         watchlist = context.bot_data.setdefault('watchlist', {})
         user_wl   = watchlist.setdefault(user_id, [])
 
