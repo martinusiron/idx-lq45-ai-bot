@@ -6,16 +6,14 @@ logger = logging.getLogger(__name__)
 class TelegramFormatter:
 
     # ------------------------------------------------------------------ #
-    #  MACRO CONTEXT BLOCK (dipakai di morning signal & standalone)
+    #  MACRO CONTEXT
     # ------------------------------------------------------------------ #
     @staticmethod
     def format_macro_context(macro: dict) -> str:
-        """Render blok kondisi makro global."""
-        data     = macro.get('data', {})
-        warnings = macro.get('warnings', [])
+        data        = macro.get('data', {})
+        warnings    = macro.get('warnings', [])
         is_risk_off = macro.get('is_risk_off', False)
 
-        # Emoji per tipe
         type_emoji = {
             'index':     '📊',
             'yield':     '📈',
@@ -27,11 +25,11 @@ class TelegramFormatter:
         msg += "━━━━━━━━━━━━━━━━━━━━━\n"
 
         for ticker, d in data.items():
-            emoji  = type_emoji.get(d['type'], '•')
-            chg    = d['change_pct']
-            sign   = "+" if chg > 0 else ""
-            arrow  = "🔴" if chg < -0.5 else "🟢" if chg > 0.5 else "⚪"
-            msg += f"{emoji} {d['label']}: <b>{d['value']:,}</b>  {arrow} {sign}{chg}%\n"
+            emoji = type_emoji.get(d['type'], '•')
+            chg   = d['change_pct']
+            sign  = "+" if chg > 0 else ""
+            arrow = "🔴" if chg < -0.5 else "🟢" if chg > 0.5 else "⚪"
+            msg  += f"{emoji} {d['label']}: <b>{d['value']:,}</b>  {arrow} {sign}{chg}%\n"
 
         if warnings:
             msg += "\n⚠️ <b>Warning Aktif:</b>\n"
@@ -39,7 +37,7 @@ class TelegramFormatter:
                 msg += f"  • {w}\n"
 
         if is_risk_off:
-            msg += "\n🚨 <b>KONDISI RISK-OFF</b> — pertimbangkan ukuran posisi lebih kecil\n"
+            msg += "\n🚨 <b>KONDISI RISK-OFF</b> — pertimbangkan posisi lebih kecil\n"
         else:
             msg += "\n✅ Kondisi makro relatif kondusif\n"
 
@@ -49,43 +47,41 @@ class TelegramFormatter:
     #  MORNING SIGNAL
     # ------------------------------------------------------------------ #
     @staticmethod
-    def format_morning_signal(signals: list[dict], macro: dict | None = None) -> str:
+    def format_morning_signal(signals: list[dict]) -> str:
         top = sorted(signals, key=lambda x: x['score'], reverse=True)[:3]
         mkt_emoji = {'trending_up': '📈', 'sideways': '➡️', 'trending_down': '📉'}
 
         msg = "🔔 <b>SINYAL PAGI — IDX Day Trader</b>\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        # Blok makro di atas sinyal
-        if macro:
-            msg += TelegramFormatter.format_macro_context(macro)
-            msg += "\n"
-
         for i, s in enumerate(top, 1):
             tp_pct = round((s['tp'] - s['price']) / s['price'] * 100, 1)
             sl_pct = round((s['price'] - s['sl']) / s['price'] * 100, 1)
             cond   = mkt_emoji.get(s.get('market_cond', ''), '❓')
+            obv    = "✅" if s.get('obv_ok') else "⚠️"
+            sup    = "🛡️" if s.get('near_support') else ""
 
             msg += (
-                f"<b>{i}. ${s['symbol']}</b>  {cond}\n"
-                f"Entry  : <b>Rp {s['price']:,}</b>\n"
-                f"TP     : Rp {s['tp']:,}  <i>(+{tp_pct}%)</i>\n"
-                f"SL     : Rp {s['sl']:,}  <i>(-{sl_pct}%)</i>\n"
-                f"RRR    : <b>1 : {s.get('rrr', 'N/A')}</b>\n"
-                f"Skor   : {s['score']}/100\n"
-                f"Sinyal : <i>{s['alasan']}</i>\n"
-                f"RSI {s['rsi']} | Stoch {s.get('stoch_k', '—')} | Vol {s['volume_ratio']}x\n"
+                f"<b>{i}. ${s['symbol']}</b>  {cond} {sup}\n"
+                f"Entry : <b>Rp {s['price']:,}</b>\n"
+                f"TP    : Rp {s['tp']:,}  <i>(+{tp_pct}%)</i>\n"
+                f"SL    : Rp {s['sl']:,}  <i>(-{sl_pct}%)</i>\n"
+                f"RRR   : <b>1 : {s.get('rrr', 'N/A')}</b>\n"
+                f"Skor  : {s['score']}/100\n"
+                f"RSI {s['rsi']} | Stoch {s.get('stoch_k','—')} | ADX {s.get('adx','—')} | OBV {obv}\n"
+                f"Vol {s['volume_ratio']}x | VWAP {'✅' if s['price'] > s.get('vwap', 0) else '⚠️'}\n"
+                f"<i>{s['alasan']}</i>\n"
                 f"{'━'*22}\n\n"
             )
 
-        msg += "⚠️ <i>Bukan rekomendasi finansial. Selalu gunakan manajemen risiko.</i>"
+        msg += "⚠️ <i>Bukan rekomendasi finansial. Gunakan manajemen risiko.</i>"
         return msg
 
     # ------------------------------------------------------------------ #
     #  AFTERNOON UPDATE
     # ------------------------------------------------------------------ #
     @staticmethod
-    def format_afternoon_update(updates: list[dict], macro: dict | None = None) -> str:
+    def format_afternoon_update(updates: list[dict]) -> str:
         msg = "📊 <b>UPDATE SORE — Hasil Hari Ini</b>\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -112,27 +108,14 @@ class TelegramFormatter:
 
         sign_total = "+" if total_pnl > 0 else ""
         msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"<b>Net Hari Ini: {sign_total}{total_pnl:.2f}%</b>\n\n"
-
-        # Macro summary singkat di update sore
-        if macro:
-            data = macro.get('data', {})
-            ihsg = data.get('^JKSE', {})
-            dxy  = data.get('DX-Y.NYB', {})
-            if ihsg:
-                sign_i = "+" if ihsg['change_pct'] > 0 else ""
-                msg += f"📊 IHSG: {ihsg['value']:,}  ({sign_i}{ihsg['change_pct']}%)\n"
-            if dxy:
-                sign_d = "+" if dxy['change_pct'] > 0 else ""
-                msg += f"💵 DXY: {dxy['value']}  ({sign_d}{dxy['change_pct']}%)\n"
-
+        msg += f"<b>Net Hari Ini: {sign_total}{total_pnl:.2f}%</b>\n"
         return msg
 
     # ------------------------------------------------------------------ #
     #  DETAIL
     # ------------------------------------------------------------------ #
     @staticmethod
-    def format_detail(s: dict, macro: dict | None = None) -> str:
+    def format_detail(s: dict) -> str:
         vol_m = f"{s['volume_real'] / 1_000_000:.1f}M"
         score = s['score']
 
@@ -152,7 +135,8 @@ class TelegramFormatter:
             'sideways':      'Sideways ➡️',
             'trending_down': 'Downtrend 📉'
         }
-        cond = cond_map.get(s.get('market_cond', ''), 'Unknown')
+        cond    = cond_map.get(s.get('market_cond', ''), 'Unknown')
+        vwap_ok = s['price'] > s.get('vwap', 0)
 
         msg = (
             f"📊 <b>Analisa: {s['symbol']}</b>\n"
@@ -161,11 +145,16 @@ class TelegramFormatter:
             f"Volume     : {vol_m} ({s['volume_ratio']}x rata-rata)\n"
             f"Pergerakan : {'+' if s['change_pct'] > 0 else ''}{s['change_pct']}%\n\n"
             f"<b>Indikator Teknikal:</b>\n"
-            f"  RSI (14)   : {s['rsi']} {'🔥' if s['rsi'] < 40 else '✅' if s['rsi'] < 60 else '⚠️'}\n"
-            f"  Stochastic : {s.get('stoch_k', 'N/A')}\n"
-            f"  MACD Hist  : {s.get('macd_hist', 'N/A')}\n"
-            f"  ATR        : {s.get('atr', 'N/A')}\n"
-            f"  Trend      : {cond}\n\n"
+            f"  RSI (14)     : {s['rsi']} {'🔥' if s['rsi'] < 40 else '✅' if s['rsi'] < 60 else '⚠️'}\n"
+            f"  Stochastic   : {s.get('stoch_k', 'N/A')}\n"
+            f"  MACD Hist    : {s.get('macd_hist', 'N/A')}\n"
+            f"  ADX          : {s.get('adx', 'N/A')} {'💪' if s.get('adx', 0) > 35 else '✅' if s.get('adx', 0) > 25 else '⚠️'}\n"
+            f"  VWAP         : Rp {s.get('vwap', 'N/A'):,}  {'✅ Above' if vwap_ok else '⚠️ Below'}\n"
+            f"  BB %B        : {s.get('bb_pct', 'N/A')} {'(Oversold)' if s.get('bb_pct', 0.5) < 0.2 else ''}\n"
+            f"  OBV          : {'✅ Konfirmasi' if s.get('obv_ok') else '⚠️ Divergence'}\n"
+            f"  Support      : {'🛡️ Dekat Support' if s.get('near_support') else 'Normal'}\n"
+            f"  ATR          : {s.get('atr', 'N/A')}\n"
+            f"  Trend        : {cond}\n\n"
             f"<b>Setup Trading:</b>\n"
             f"  Entry : Rp {s['price']:,}\n"
             f"  TP    : Rp {s['tp']:,} (+{tp_pct}%)\n"
@@ -173,31 +162,22 @@ class TelegramFormatter:
             f"  RRR   : 1 : {s.get('rrr', 'N/A')}\n\n"
             f"Sinyal  : <i>{s['alasan']}</i>\n"
             f"Skor AI : {score}/100\n\n"
-            f"<b>Rekomendasi: {rek_emoji} {rek}</b>\n"
+            f"<b>Rekomendasi: {rek_emoji} {rek}</b>\n\n"
+            f"⚠️ <i>Bukan rekomendasi finansial.</i>"
         )
-
-        # Append macro context di bagian bawah detail
-        if macro:
-            msg += f"\n{TelegramFormatter.format_macro_context(macro)}"
-
-        msg += "\n⚠️ <i>Bukan rekomendasi finansial.</i>"
         return msg
 
     # ------------------------------------------------------------------ #
     #  TOP STOCKS
     # ------------------------------------------------------------------ #
     @staticmethod
-    def format_top(top_vol: list[dict], top_gainers: list[dict], macro: dict | None = None) -> str:
+    def format_top(top_vol: list[dict], top_gainers: list[dict]) -> str:
         msg = "🏆 <b>TOP SAHAM LQ45 HARI INI</b>\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        if macro:
-            msg += TelegramFormatter.format_macro_context(macro)
-            msg += "\n"
-
         msg += "🔥 <b>Volume Tertinggi:</b>\n"
         for i, s in enumerate(top_vol, 1):
-            msg += f"  {i}. <b>{s['symbol']}</b> — {s['volume_ratio']}x rata-rata  (RSI: {s['rsi']})\n"
+            msg += f"  {i}. <b>{s['symbol']}</b> — {s['volume_ratio']}x  (RSI: {s['rsi']} | ADX: {s.get('adx','—')})\n"
 
         msg += "\n🚀 <b>Gainers Terkuat:</b>\n"
         for i, s in enumerate(top_gainers, 1):
@@ -208,19 +188,19 @@ class TelegramFormatter:
 
         msg += "\n🎯 <b>RRR Terbaik:</b>\n"
         for i, s in enumerate(best_rrr, 1):
-            msg += f"  {i}. <b>{s['symbol']}</b> — RRR 1:{s.get('rrr', 'N/A')}\n"
+            vwap_ok = s['price'] > s.get('vwap', 0)
+            msg += f"  {i}. <b>{s['symbol']}</b> — RRR 1:{s.get('rrr','N/A')}  VWAP {'✅' if vwap_ok else '⚠️'}\n"
 
         return msg
 
     # ------------------------------------------------------------------ #
-    #  MACRO STANDALONE (untuk command /macro)
+    #  MACRO STANDALONE
     # ------------------------------------------------------------------ #
     @staticmethod
     def format_macro_standalone(macro: dict) -> str:
-        msg = TelegramFormatter.format_macro_context(macro)
-        
-        # Tambah penjelasan dampak ke sektor IDX
+        msg  = TelegramFormatter.format_macro_context(macro)
         data = macro.get('data', {})
+
         msg += "\n📌 <b>Dampak ke Sektor IDX:</b>\n"
 
         oil  = data.get('BZ=F', {})
@@ -230,17 +210,17 @@ class TelegramFormatter:
 
         if oil:
             arah = "positif ✅" if oil['change_pct'] > 0 else "negatif ⚠️"
-            msg += f"  • Minyak naik/turun → BREN, MEDC, ENRG ({arah})\n"
+            msg += f"  • Minyak → BREN, MEDC, ENRG ({arah})\n"
         if ni:
             arah = "positif ✅" if ni['change_pct'] > 0 else "negatif ⚠️"
-            msg += f"  • Nikel → INCO, MDKA, ANTM ({arah})\n"
+            msg += f"  • Nikel  → INCO, MDKA, ANTM ({arah})\n"
         if coal:
             arah = "positif ✅" if coal['change_pct'] > 0 else "negatif ⚠️"
             msg += f"  • Batubara → ADRO, ITMG, PTBA ({arah})\n"
         if dxy:
             if dxy['change_pct'] > 0.3:
-                msg += "  • DXY naik → tekanan Rupiah, perbankan & consumer goods negatif ⚠️\n"
+                msg += "  • DXY naik → tekanan Rupiah, banking & consumer negatif ⚠️\n"
             elif dxy['change_pct'] < -0.3:
-                msg += "  • DXY turun → Rupiah menguat, inflow ke emerging market ✅\n"
+                msg += "  • DXY turun → Rupiah menguat, inflow EM ✅\n"
 
         return msg
