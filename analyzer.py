@@ -224,7 +224,7 @@ class StockAnalyzer:
     # ------------------------------------------------------------------ #
     #  MAIN ANALYZE
     # ------------------------------------------------------------------ #
-    def analyze(self, symbol: str, threshold: int = 75) -> dict | None:
+    def analyze(self, symbol: str, threshold: int = 75, strict_filter: bool = True) -> dict | None:
         df = self.fetch_data(symbol)
         if df is None:
             logger.info(f"[{symbol}] fetch_data return None")
@@ -293,13 +293,13 @@ class StockAnalyzer:
 
         # ── Liquidity Gate ─────────────────────────────────────────────
         vol_ratio = latest['vol_ratio']
-        if vol_ratio < self.min_volume_ratio:
+        if strict_filter and vol_ratio < self.min_volume_ratio:
             logger.info(f"[{symbol}] TIDAK LOLOS liquidity gate: vol_ratio={vol_ratio:.2f}")
             return None
 
         # ── ADX Filter — skip jika market terlalu sideways ─────────────
         adx = latest['adx']
-        if threshold > 0 and adx < self.min_adx:
+        if strict_filter and threshold > 0 and adx < self.min_adx:
             logger.info(f"[{symbol}] TIDAK LOLOS ADX filter: adx={adx:.1f} < {self.min_adx}")
             return None
 
