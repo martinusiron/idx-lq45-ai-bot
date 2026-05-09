@@ -1,8 +1,18 @@
-import yfinance as yf
-import ta
-import pandas as pd
-import numpy as np
+"""
+analyzer.py — IDX Day Trader Signal Engine v4
+
+20 indikator teknikal + MTF + anti-chasing + IHSG correlation.
+Compatible dengan repo martinusiron/idx-lq45-ai-bot.
+"""
+from __future__ import annotations
+
 import logging
+
+import numpy as np
+import pandas as pd
+import ta
+import yfinance as yf
+
 from config import DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS
 
 logger = logging.getLogger(__name__)
@@ -10,31 +20,36 @@ logger = logging.getLogger(__name__)
 
 class StockAnalyzer:
     """
-    IDX Day Trader Analyzer — Enhanced v3
-    Indikator lengkap:
-    1.  EMA20 vs EMA50      — Trend filter
-    2.  RSI (14)            — Momentum oversold/overbought
-    3.  Stochastic (14,3,3) — Double konfirmasi momentum
-    4.  MACD (12,26,9)      — Crossover & histogram
-    5.  ATR (14)            — Volatility-based TP/SL
-    6.  Volume Ratio        — Spike detection
-    7.  Candlestick Pattern — Hammer, Engulfing, Morning Star
-    8.  Market Condition    — Trending vs Sideways multiplier
-    -- BARU --
-    9.  VWAP                — Institutional benchmark intraday
-    10. Bollinger Bands     — Squeeze & lower band touch
-    11. ADX (14)            — Trend strength filter (ADX < 20 = skip)
-    12. OBV Divergence      — Volume/price confirmation
-    13. Support/Resistance  — Pivot-based S/R proximity
-    14. Gap Detection       — Gap up/down dari close kemarin
-    15. RSI Divergence      — Bullish divergence detection
-    16. Fibonacci TP        — Level 61.8% sebagai TP alternatif
+    IDX Day Trader Analyzer — v4
+
+    Indikator:
+     1. EMA20 vs EMA50          — Trend filter
+     2. RSI (14)                — Momentum
+     3. Stochastic (14,3,3)     — Double konfirmasi
+     4. MACD (12,26,9)          — Crossover & histogram
+     5. ATR (14)                — Volatility-based TP/SL
+     6. Volume Ratio            — Spike detection
+     7. Candlestick Pattern     — Hammer, Engulfing, Morning Star, Marubozu
+     8. Market Condition        — Trending vs Sideways multiplier
+     9. VWAP                    — Institutional intraday benchmark
+    10. Bollinger Bands         — Squeeze & oversold detection
+    11. ADX (14)                — Trend strength filter
+    12. OBV Divergence          — Volume/price confirmation
+    13. Support/Resistance      — Multi-level pivot detection
+    14. Gap Detection           — Gap up/down scoring
+    15. RSI Divergence          — Bullish divergence
+    16. Anti-Chasing            — Block FOMO entry (>3% dari open)
+    17. Bid-Ask Spread Proxy    — Filter likuiditas buruk
+    18. MTF Daily Confirmation  — Konfirmasi trend harian
+    19. Relative Strength IHSG  — Saham lebih kuat dari indeks
+    20. IHSG Correlation        — Penalty saat market merah
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.min_data_points  = 60
-        self.min_volume_ratio = 0.3   # Min 30% dari rata-rata volume
-        self.min_adx          = 20    # ADX < 20 = sideways, skip
+        self.min_volume_ratio = 0.3
+        self.min_adx          = 20
+        self.max_spread_pct   = 3.0
 
     # ------------------------------------------------------------------ #
     #  DATA FETCHING
@@ -43,18 +58,13 @@ class StockAnalyzer:
         self,
         symbol: str,
         period: str = DATA_PERIOD,
-        interval: str = DATA_INTERVAL
+        interval: str = DATA_INTERVAL,
     ) -> pd.DataFrame | None:
-        """
-        Fetch OHLCV dari Yahoo Finance.
-        PENTING: '59d' bukan '2mo' — Yahoo Finance batasi 15m hanya 60 hari.
-        """
+        """Fetch OHLCV 15m. Pakai '59d' bukan '2mo' — Yahoo batas 60 hari."""
         try:
-            ticker = f"{symbol}.JK" if not symbol.endswith('.JK') else symbol
-            df = yf.download(
-                ticker, period=period, interval=interval,
-                progress=False, auto_adjust=True
-            )
+            ticker = f"{symbol}.JK" if not symbol.endswith(".JK") else symbol
+            df = yf.download(ticker, period=period, interval=interval,
+                             progress=False, auto_adjust=True)
 
             logger.info(f"[{symbol}] df.empty={df.empty}, len={len(df)}")
             if df.empty:
@@ -62,510 +72,502 @@ class StockAnalyzer:
 
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-
             df.columns = [c.lower() for c in df.columns]
-
-            logger.info(f"[{symbol}] columns={list(df.columns)}, rows={len(df)}, min_required={self.min_data_points}")
 
             if len(df) < self.min_data_points:
                 return None
-
             return df
+        except Exception as exc:
+            logger.error(f"[{symbol}] fetch_data error: {exc}")
+            return None
 
-        except Exception as e:
-            logger.error(f"[{symbol}] fetch_data error: {e}")
+    def fetch_daily(self, symbol: str) -> pd.DataFrame | None:
+        """Fetch data daily untuk MTF confirmation."""
+        try:
+            ticker = f"{symbol}.JK" if not symbol.endswith(".JK") else symbol
+            df = yf.download(ticker, period="6mo", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df.empty or len(df) < 20:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df.columns = [c.lower() for c in df.columns]
+            return df
+        except Exception as exc:
+            logger.warning(f"[{symbol}] fetch_daily error: {exc}")
+            return None
+
+    def fetch_ihsg(self) -> float | None:
+        """Fetch % perubahan IHSG hari ini."""
+        try:
+            df = yf.download("^JKSE", period="5d", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df.empty or len(df) < 2:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df.columns = [c.lower() for c in df.columns]
+            return round(
+                (float(df["close"].iloc[-1]) - float(df["close"].iloc[-2]))
+                / float(df["close"].iloc[-2]) * 100, 2
+            )
+        except Exception:
             return None
 
     # ------------------------------------------------------------------ #
-    #  VWAP (manual — library ta tidak punya VWAP yang proper)
+    #  STATIC HELPERS
     # ------------------------------------------------------------------ #
     @staticmethod
     def _calc_vwap(df: pd.DataFrame) -> pd.Series:
-        """
-        VWAP = cumulative(typical_price * volume) / cumulative(volume)
-        Reset setiap hari (group by date).
-        """
-        df = df.copy()
-        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-        df['tp_vol']        = df['typical_price'] * df['volume']
-        df['date']          = df.index.date
+        """VWAP harian — reset setiap hari."""
+        d = df.copy()
+        d["tp"]    = (d["high"] + d["low"] + d["close"]) / 3
+        d["tp_vol"] = d["tp"] * d["volume"]
+        d["date"]  = d.index.date
+        return (
+            d.groupby("date")
+            .apply(lambda g: g["tp_vol"].cumsum() / g["volume"].cumsum())
+            .reset_index(level=0, drop=True)
+        )
 
-        vwap = df.groupby('date').apply(
-            lambda g: (g['tp_vol'].cumsum() / g['volume'].cumsum())
-        ).reset_index(level=0, drop=True)
-
-        return vwap
-
-    # ------------------------------------------------------------------ #
-    #  SUPPORT & RESISTANCE (Pivot-based)
-    # ------------------------------------------------------------------ #
-    #  SUPPORT & RESISTANCE — Multi-level pivot detection
-    # ------------------------------------------------------------------ #
     @staticmethod
-    def _find_sr_levels(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float, list, list]:
-        """
-        Cari S/R menggunakan pivot high/low yang valid (2-bar confirmation).
-        Return: (nearest_support, nearest_resistance, all_supports, all_resistances)
-        """
+    def _find_sr_levels(
+        df: pd.DataFrame, lookback: int = 20
+    ) -> tuple[float, float, list, list]:
+        """Pivot-based S/R dengan 2-bar confirmation."""
         recent = df.iloc[-lookback - 4:]
-        price  = float(df['close'].iloc[-1])
-        supports, resistances = [], []
+        price  = float(df["close"].iloc[-1])
+        sup, res = [], []
 
         for i in range(2, len(recent) - 2):
-            low  = recent['low'].iloc[i]
-            high = recent['high'].iloc[i]
-            if (low < recent['low'].iloc[i-1] and low < recent['low'].iloc[i-2]
-                    and low < recent['low'].iloc[i+1] and low < recent['low'].iloc[i+2]):
-                supports.append(round(float(low), 0))
-            if (high > recent['high'].iloc[i-1] and high > recent['high'].iloc[i-2]
-                    and high > recent['high'].iloc[i+1] and high > recent['high'].iloc[i+2]):
-                resistances.append(round(float(high), 0))
+            lo = recent["low"].iloc[i]
+            hi = recent["high"].iloc[i]
+            if (lo < recent["low"].iloc[i-1] and lo < recent["low"].iloc[i-2]
+                    and lo < recent["low"].iloc[i+1] and lo < recent["low"].iloc[i+2]):
+                sup.append(round(float(lo), 0))
+            if (hi > recent["high"].iloc[i-1] and hi > recent["high"].iloc[i-2]
+                    and hi > recent["high"].iloc[i+1] and hi > recent["high"].iloc[i+2]):
+                res.append(round(float(hi), 0))
 
-        if not supports:
-            supports    = [round(float(recent['low'].min()), 0)]
-        if not resistances:
-            resistances = [round(float(recent['high'].max()), 0)]
+        if not sup:
+            sup = [round(float(recent["low"].min()), 0)]
+        if not res:
+            res = [round(float(recent["high"].max()), 0)]
 
-        below = [s for s in supports if s < price]
-        nearest_support = max(below) if below else min(supports)
-        above = [r for r in resistances if r > price]
-        nearest_resistance = min(above) if above else max(resistances)
+        below = [s for s in sup if s < price]
+        above = [r for r in res if r > price]
+        return (
+            max(below) if below else min(sup),
+            min(above) if above else max(res),
+            sorted(sup), sorted(res),
+        )
 
-        return nearest_support, nearest_resistance, sorted(supports), sorted(resistances)
-
-    # ------------------------------------------------------------------ #
-    #  BEST ENTRY — Zona entry optimal
-    # ------------------------------------------------------------------ #
     @staticmethod
-    def _calc_best_entry(price: float, support: float, vwap: float, bb_lower: float) -> dict:
-        """
-        Entry ideal di area: pullback VWAP, dekat support, atau lower BB.
-        Bukan selalu market price.
-        """
+    def _calc_best_entry(
+        price: float, support: float, vwap: float, bb_lower: float
+    ) -> dict:
+        """Zona entry ideal: VWAP pullback / dekat support / lower BB."""
         candidates = {
-            'market':  round(price, 0),
-            'vwap':    round(vwap * 1.001, 0),
-            'support': round(support * 1.005, 0),
-            'bb_low':  round(bb_lower * 1.002, 0),
+            "market":  round(price, 0),
+            "vwap":    round(vwap * 1.001, 0),
+            "support": round(support * 1.005, 0),
+            "bb_low":  round(bb_lower * 1.002, 0),
         }
-        # Entry harus di bawah harga sekarang dan tidak lebih dari 3% di bawah
         valid = {k: v for k, v in candidates.items() if price * 0.97 <= v <= price}
         if not valid:
-            valid = {'market': round(price, 0)}
-        best_key   = max(valid, key=lambda k: valid[k])
-        best_price = valid[best_key]
+            valid = {"market": round(price, 0)}
+        best_key = max(valid, key=lambda k: valid[k])
         return {
-            'best_entry':       int(best_price),
-            'entry_type':       best_key,
-            'entry_candidates': {k: int(v) for k, v in candidates.items()},
+            "best_entry":       int(valid[best_key]),
+            "entry_type":       best_key,
+            "entry_candidates": {k: int(v) for k, v in candidates.items()},
         }
 
-    # ------------------------------------------------------------------ #
-    #  RSI DIVERGENCE
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _detect_rsi_divergence(df: pd.DataFrame, lookback: int = 10) -> bool:
-        """
-        Bullish divergence: harga buat lower low tapi RSI buat higher low.
-        """
-        try:
-            recent = df.iloc[-lookback:]
-            price_min_idx = recent['close'].idxmin()
-            rsi_at_price_min = recent.loc[price_min_idx, 'rsi']
-
-            # Bandingkan dengan RSI sekarang
-            current_rsi   = df['rsi'].iloc[-1]
-            current_price = df['close'].iloc[-1]
-            prev_low      = float(recent['close'].min())
-
-            if current_price <= prev_low * 1.01 and current_rsi > rsi_at_price_min * 1.05:
-                return True  # Harga flat/turun tapi RSI naik = bullish divergence
-        except Exception:
-            pass
-        return False
-
-    # ------------------------------------------------------------------ #
-    #  BOLLINGER BAND SQUEEZE DETECTION
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _detect_bb_squeeze(df: pd.DataFrame) -> tuple[bool, bool]:
-        """
-        Return: (is_squeeze, touch_lower_band)
-        Squeeze = bandwidth sangat sempit (volatilitas rendah sebelum breakout)
-        """
-        bw = df['bb_bandwidth'].dropna()
-        if len(bw) < 10:
-            return False, False
-
-        current_bw   = bw.iloc[-1]
-        avg_bw       = bw.iloc[-20:].mean()
-        is_squeeze   = current_bw < avg_bw * 0.5   # bandwidth < 50% rata-rata = squeeze
-
-        # Touch lower band: harga menyentuh atau di bawah lower band
-        touch_lower  = df['close'].iloc[-1] <= df['bb_lower'].iloc[-1] * 1.005
-
-        return bool(is_squeeze), bool(touch_lower)
-
-    # ------------------------------------------------------------------ #
-    #  FIBONACCI TP
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _calc_fib_tp(df: pd.DataFrame, price: float) -> float:
-        """
-        Hitung TP berdasarkan Fibonacci 61.8% dari swing low ke swing high (20 bar).
-        """
-        try:
-            recent     = df.iloc[-20:]
-            swing_low  = float(recent['low'].min())
-            swing_high = float(recent['high'].max())
-            fib_618    = swing_low + (swing_high - swing_low) * 1.618
-            # Pakai fib 61.8% extension dari swing sebagai TP kalau lebih tinggi dari ATR TP
-            return fib_618
-        except Exception:
-            return price * 1.03
-
-    # ------------------------------------------------------------------ #
-    #  CANDLESTICK PATTERN
-    # ------------------------------------------------------------------ #
     @staticmethod
     def _detect_candle_pattern(df: pd.DataFrame) -> tuple[str, int]:
         c = df.iloc[-1]
         p = df.iloc[-2]
-
-        body         = abs(c['close'] - c['open'])
-        candle_range = c['high'] - c['low']
-        lower_wick   = min(c['close'], c['open']) - c['low']
-
-        if candle_range == 0:
-            return ("", 0)
-
-        body_ratio       = body / candle_range
-        lower_wick_ratio = lower_wick / candle_range
-
-        if lower_wick_ratio > 0.55 and body_ratio < 0.35 and c['close'] >= c['open']:
-            return ("Bullish Hammer 🔨", 15)
-
-        if (c['close'] > c['open'] and p['close'] < p['open']
-                and c['open'] <= p['close'] and c['close'] >= p['open']):
-            return ("Bullish Engulfing 🕯️", 20)
-
+        body        = abs(c["close"] - c["open"])
+        rng         = c["high"] - c["low"]
+        lower_wick  = min(c["close"], c["open"]) - c["low"]
+        if rng == 0:
+            return "", 0
+        br = body / rng
+        lwr = lower_wick / rng
+        if lwr > 0.55 and br < 0.35 and c["close"] >= c["open"]:
+            return "Bullish Hammer 🔨", 15
+        if (c["close"] > c["open"] and p["close"] < p["open"]
+                and c["open"] <= p["close"] and c["close"] >= p["open"]):
+            return "Bullish Engulfing 🕯️", 20
         if len(df) >= 3:
             pp = df.iloc[-3]
-            if (pp['close'] < pp['open']
-                    and body_ratio < 0.3
-                    and c['close'] > c['open']
-                    and c['close'] > (pp['open'] + pp['close']) / 2):
-                return ("Morning Star ⭐", 20)
+            if (pp["close"] < pp["open"] and br < 0.3 and c["close"] > c["open"]
+                    and c["close"] > (pp["open"] + pp["close"]) / 2):
+                return "Morning Star ⭐", 20
+        if br > 0.85 and c["close"] > c["open"]:
+            return "Marubozu Bullish 💹", 10
+        return "", 0
 
-        if body_ratio > 0.85 and c['close'] > c['open']:
-            return ("Marubozu Bullish 💹", 10)
+    @staticmethod
+    def _detect_bb_squeeze(df: pd.DataFrame) -> tuple[bool, bool]:
+        bw = df["bb_bandwidth"].dropna()
+        if len(bw) < 10:
+            return False, False
+        squeeze     = bw.iloc[-1] < bw.iloc[-20:].mean() * 0.5
+        touch_lower = df["close"].iloc[-1] <= df["bb_lower"].iloc[-1] * 1.005
+        return bool(squeeze), bool(touch_lower)
 
-        return ("", 0)
+    @staticmethod
+    def _detect_rsi_divergence(df: pd.DataFrame, lookback: int = 10) -> bool:
+        try:
+            rec = df.iloc[-lookback:]
+            idx = rec["close"].idxmin()
+            if df["close"].iloc[-1] <= float(rec["close"].min()) * 1.01:
+                return float(df["rsi"].iloc[-1]) > float(rec.loc[idx, "rsi"]) * 1.05
+        except Exception:
+            pass
+        return False
 
-    # ------------------------------------------------------------------ #
-    #  MARKET CONDITION
-    # ------------------------------------------------------------------ #
     @staticmethod
     def _market_condition(df: pd.DataFrame) -> str:
-        ema20 = df['ema20'].dropna()
+        ema20 = df["ema20"].dropna()
         if len(ema20) < 10:
-            return 'sideways'
+            return "sideways"
         slope = (ema20.iloc[-1] - ema20.iloc[-10]) / ema20.iloc[-10] * 100
         if slope > 0.5:
-            return 'trending_up'
-        elif slope < -0.5:
-            return 'trending_down'
-        return 'sideways'
+            return "trending_up"
+        if slope < -0.5:
+            return "trending_down"
+        return "sideways"
+
+    @staticmethod
+    def _mtf_confirmation(df_daily: pd.DataFrame | None) -> tuple[str, int]:
+        """Konfirmasi trend dari timeframe harian."""
+        if df_daily is None or len(df_daily) < 20:
+            return "unknown", 0
+        ema20d = df_daily["close"].ewm(span=20).mean()
+        ema50d = df_daily["close"].ewm(span=50).mean()
+        price  = float(df_daily["close"].iloc[-1])
+        if ema20d.iloc[-1] > ema50d.iloc[-1] and price > ema20d.iloc[-1]:
+            return "daily_uptrend", 20
+        if ema20d.iloc[-1] < ema50d.iloc[-1]:
+            return "daily_downtrend", -20
+        return "daily_neutral", 0
+
+    @staticmethod
+    def _relative_strength(df: pd.DataFrame, ihsg_chg: float | None) -> tuple[bool, int]:
+        if ihsg_chg is None:
+            return False, 0
+        stk_chg = (
+            (float(df["close"].iloc[-1]) - float(df["close"].iloc[-2]))
+            / float(df["close"].iloc[-2]) * 100
+        )
+        if stk_chg > ihsg_chg + 0.5:
+            return True, 15
+        if stk_chg < ihsg_chg - 0.5:
+            return False, -10
+        return False, 0
+
+    @staticmethod
+    def _is_chasing(df: pd.DataFrame) -> bool:
+        """Return True jika harga sudah naik >3% dari open hari ini."""
+        try:
+            today_open = float(df["open"].iloc[0])
+            current    = float(df["close"].iloc[-1])
+            return (current - today_open) / today_open * 100 > 3.0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _spread_proxy(df: pd.DataFrame) -> float:
+        latest = df.iloc[-1]
+        if float(latest["close"]) == 0:
+            return 0.0
+        return (float(latest["high"]) - float(latest["low"])) / float(latest["close"]) * 100
 
     # ------------------------------------------------------------------ #
     #  MAIN ANALYZE
     # ------------------------------------------------------------------ #
-    def analyze(self, symbol: str, threshold: int = 75, strict_filter: bool = True) -> dict | None:
+    def analyze(
+        self,
+        symbol: str,
+        threshold: int = 75,
+        strict_filter: bool = True,
+        ihsg_chg: float | None = None,
+    ) -> dict | None:
         df = self.fetch_data(symbol)
         if df is None:
             logger.info(f"[{symbol}] fetch_data return None")
             return None
 
-        # ── Indikator Lama ─────────────────────────────────────────────
-        df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
-        df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
-        df['rsi']   = ta.momentum.rsi(df['close'], window=14)
+        # ── Indikator ──────────────────────────────────────────────────
+        df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
+        df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
+        df["rsi"]   = ta.momentum.rsi(df["close"], window=14)
 
-        stoch_ind     = ta.momentum.StochasticOscillator(
-            df['high'], df['low'], df['close'], window=14, smooth_window=3
-        )
-        df['stoch_k'] = stoch_ind.stoch()
-        df['stoch_d'] = stoch_ind.stoch_signal()
+        stoch = ta.momentum.StochasticOscillator(
+            df["high"], df["low"], df["close"], window=14, smooth_window=3)
+        df["stoch_k"] = stoch.stoch()
+        df["stoch_d"] = stoch.stoch_signal()
 
-        macd_ind          = ta.trend.MACD(df['close'], window_fast=12, window_slow=26, window_sign=9)
-        df['macd']        = macd_ind.macd()
-        df['macd_signal'] = macd_ind.macd_signal()
-        df['macd_hist']   = macd_ind.macd_diff()
+        macd = ta.trend.MACD(df["close"], window_fast=12, window_slow=26, window_sign=9)
+        df["macd"]        = macd.macd()
+        df["macd_signal"] = macd.macd_signal()
+        df["macd_hist"]   = macd.macd_diff()
 
-        df['atr'] = ta.volatility.average_true_range(
-            df['high'], df['low'], df['close'], window=14
-        )
+        df["atr"] = ta.volatility.average_true_range(
+            df["high"], df["low"], df["close"], window=14)
 
-        df['vol_ma']    = df['volume'].rolling(window=20).mean()
-        df['vol_ratio'] = df['volume'] / df['vol_ma'].replace(0, np.nan)
+        df["vol_ma"]    = df["volume"].rolling(window=20).mean()
+        df["vol_ratio"] = df["volume"] / df["vol_ma"].replace(0, np.nan)
 
-        # ── Indikator Baru ─────────────────────────────────────────────
-
-        # 9. VWAP
         try:
-            df['vwap'] = StockAnalyzer._calc_vwap(df)
+            df["vwap"] = self._calc_vwap(df)
         except Exception:
-            df['vwap'] = df['close']  # fallback
+            df["vwap"] = df["close"]
 
-        # 10. Bollinger Bands (20, 2)
-        bb_ind             = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
-        df['bb_upper']     = bb_ind.bollinger_hband()
-        df['bb_lower']     = bb_ind.bollinger_lband()
-        df['bb_mid']       = bb_ind.bollinger_mavg()
-        df['bb_bandwidth'] = bb_ind.bollinger_wband()
-        df['bb_pct']       = bb_ind.bollinger_pband()   # %B: 0=lower, 1=upper
+        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
+        df["bb_upper"]     = bb.bollinger_hband()
+        df["bb_lower"]     = bb.bollinger_lband()
+        df["bb_mid"]       = bb.bollinger_mavg()
+        df["bb_bandwidth"] = bb.bollinger_wband()
+        df["bb_pct"]       = bb.bollinger_pband()
 
-        # 11. ADX (14) — trend strength
-        adx_ind    = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
-        df['adx']  = adx_ind.adx()
-        df['adx_pos'] = adx_ind.adx_pos()   # +DI
-        df['adx_neg'] = adx_ind.adx_neg()   # -DI
+        adx_ind    = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        df["adx"]     = adx_ind.adx()
+        df["adx_pos"] = adx_ind.adx_pos()
+        df["adx_neg"] = adx_ind.adx_neg()
 
-        # 12. OBV
-        df['obv']    = ta.volume.on_balance_volume(df['close'], df['volume'])
-        df['obv_ma'] = df['obv'].rolling(window=20).mean()
+        df["obv"]    = ta.volume.on_balance_volume(df["close"], df["volume"])
+        df["obv_ma"] = df["obv"].rolling(window=20).mean()
 
-        # ── Drop NaN ───────────────────────────────────────────────────
         logger.info(f"[{symbol}] sebelum dropna: {len(df)} rows")
         df = df.dropna()
         logger.info(f"[{symbol}] setelah dropna: {len(df)} rows")
 
         if df.empty:
-            logger.info(f"[{symbol}] df kosong setelah dropna")
             return None
 
         latest = df.iloc[-1]
         prev   = df.iloc[-2]
 
-        # ── Liquidity Gate ─────────────────────────────────────────────
-        vol_ratio = latest['vol_ratio']
-        if strict_filter and vol_ratio < self.min_volume_ratio:
-            logger.info(f"[{symbol}] TIDAK LOLOS liquidity gate: vol_ratio={vol_ratio:.2f}")
-            return None
-        if strict_filter and float(latest['volume']) < MIN_VOLUME_ABS:
-            logger.info(
-                f"[{symbol}] TIDAK LOLOS absolute volume gate: "
-                f"volume={float(latest['volume']):.0f} < {MIN_VOLUME_ABS}"
-            )
-            return None
+        # ── Pre-filter Gates ───────────────────────────────────────────
+        vol_ratio = float(latest["vol_ratio"])
+        adx       = float(latest["adx"])
+        spread    = self._spread_proxy(df)
 
-        # ── ADX Filter — skip jika market terlalu sideways ─────────────
-        adx = latest['adx']
-        if strict_filter and threshold > 0 and adx < self.min_adx:
-            logger.info(f"[{symbol}] TIDAK LOLOS ADX filter: adx={adx:.1f} < {self.min_adx}")
-            return None
+        if strict_filter:
+            if vol_ratio < self.min_volume_ratio:
+                logger.info(f"[{symbol}] GATE vol_ratio={vol_ratio:.2f}")
+                return None
+            if float(latest["volume"]) < MIN_VOLUME_ABS:
+                logger.info(f"[{symbol}] GATE abs_volume={float(latest['volume']):.0f}")
+                return None
+            if threshold > 0 and adx < self.min_adx:
+                logger.info(f"[{symbol}] GATE adx={adx:.1f}")
+                return None
+            if spread > self.max_spread_pct:
+                logger.info(f"[{symbol}] GATE spread={spread:.1f}%")
+                return None
+            if self._is_chasing(df):
+                logger.info(f"[{symbol}] GATE anti-chasing")
+                return None
 
         # ── Scoring ────────────────────────────────────────────────────
-        score   = 0
-        reasons = []
+        score, reasons = 0, []
 
-        # 1. Trend Filter EMA
-        if latest['ema20'] > latest['ema50']:
-            score += 20
-            reasons.append("Uptrend EMA20>50")
+        # 1. EMA Trend
+        if latest["ema20"] > latest["ema50"]:
+            score += 20; reasons.append("Uptrend EMA20>50")
 
-        # 2. Harga di atas EMA20
-        if latest['close'] > latest['ema20']:
-            score += 15
-            reasons.append("Harga > EMA20")
+        # 2. Price vs EMA20
+        if latest["close"] > latest["ema20"]:
+            score += 15; reasons.append("Harga > EMA20")
 
         # 3. RSI
-        rsi = latest['rsi']
+        rsi = float(latest["rsi"])
         if 30 <= rsi <= 45:
-            score += 30
-            reasons.append(f"RSI Rebound ({rsi:.0f})")
+            score += 30; reasons.append(f"RSI Rebound ({rsi:.0f})")
         elif 45 < rsi <= 60:
             score += 15
         elif rsi > 70:
             score -= 10
 
         # 4. Stochastic
-        sk = latest['stoch_k']
-        sd = latest['stoch_d']
+        sk = float(latest["stoch_k"])
+        sd = float(latest["stoch_d"])
         if sk < 25 and sk > sd:
-            score += 20
-            reasons.append(f"Stoch Bullish Cross ({sk:.0f})")
+            score += 20; reasons.append(f"Stoch Bullish Cross ({sk:.0f})")
         elif sk < 40 and sk > sd:
             score += 10
 
         # 5. MACD
-        if latest['macd'] > latest['macd_signal'] and prev['macd'] <= prev['macd_signal']:
-            score += 20
-            reasons.append("MACD Golden Cross")
-        elif latest['macd'] > latest['macd_signal']:
-            score += 10
-            reasons.append("MACD Bullish")
-        if latest['macd_hist'] > 0 and latest['macd_hist'] > prev['macd_hist']:
+        if float(latest["macd"]) > float(latest["macd_signal"]) and float(prev["macd"]) <= float(prev["macd_signal"]):
+            score += 20; reasons.append("MACD Golden Cross")
+        elif float(latest["macd"]) > float(latest["macd_signal"]):
+            score += 10; reasons.append("MACD Bullish")
+        if float(latest["macd_hist"]) > 0 and float(latest["macd_hist"]) > float(prev["macd_hist"]):
             score += 5
 
-        # 6. Volume Spike
+        # 6. Volume
         if vol_ratio > 2.0:
-            score += 25
-            reasons.append(f"Volume Spike {vol_ratio:.1f}x")
+            score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
         elif vol_ratio > 1.5:
-            score += 15
-            reasons.append(f"Volume Naik {vol_ratio:.1f}x")
+            score += 15; reasons.append(f"Volume Naik {vol_ratio:.1f}x")
 
-        # 7. Candlestick Pattern
-        pattern_name, pattern_score = StockAnalyzer._detect_candle_pattern(df)
-        if pattern_score > 0:
-            score += pattern_score
-            reasons.append(pattern_name)
+        # 7. Candlestick
+        pname, pscore = self._detect_candle_pattern(df)
+        if pscore > 0:
+            score += pscore; reasons.append(pname)
 
         # 8. Market Condition Multiplier
-        market = StockAnalyzer._market_condition(df)
-        if market == 'trending_up':
+        market = self._market_condition(df)
+        if market == "trending_up":
             score = int(score * 1.1)
-        elif market == 'sideways':
+        elif market == "sideways":
             score = int(score * 0.85)
-        elif market == 'trending_down':
+        elif market == "trending_down":
             score = int(score * 0.70)
 
-        # 9. VWAP — indikator institusional
-        if latest['close'] > latest['vwap']:
-            score += 20
-            reasons.append("Harga > VWAP 📊")
-        elif latest['close'] < latest['vwap'] * 0.99:
-            score -= 10  # Harga jauh di bawah VWAP = bearish intraday
+        # 9. VWAP
+        if float(latest["close"]) > float(latest["vwap"]):
+            score += 20; reasons.append("Harga > VWAP 📊")
+        elif float(latest["close"]) < float(latest["vwap"]) * 0.99:
+            score -= 10
 
         # 10. Bollinger Bands
-        is_squeeze, touch_lower = StockAnalyzer._detect_bb_squeeze(df)
+        is_squeeze, touch_lower = self._detect_bb_squeeze(df)
         if is_squeeze:
-            score += 15
-            reasons.append("BB Squeeze 🔥")   # Volatilitas rendah = potensi breakout
+            score += 15; reasons.append("BB Squeeze 🔥")
         if touch_lower:
-            score += 15
-            reasons.append("BB Lower Touch")  # Oversold di lower band
+            score += 15; reasons.append("BB Lower Touch")
 
-        # 11. ADX — tambah bonus kalau trend sangat kuat
+        # 11. ADX
         if adx > 35:
-            score += 15
-            reasons.append(f"Trend Kuat ADX {adx:.0f}")
+            score += 15; reasons.append(f"Trend Kuat ADX {adx:.0f}")
         elif adx > 25:
             score += 8
-        # +DI > -DI = arah bullish dikonfirmasi ADX
-        if latest['adx_pos'] > latest['adx_neg']:
-            score += 10
-            reasons.append("+DI > -DI Bullish")
+        if float(latest["adx_pos"]) > float(latest["adx_neg"]):
+            score += 10; reasons.append("+DI > -DI Bullish")
 
-        # 12. OBV Confirmation
-        obv_rising = latest['obv'] > latest['obv_ma']
-        if obv_rising and latest['close'] > prev['close']:
-            score += 15
-            reasons.append("OBV Konfirmasi ✅")
-        elif not obv_rising and latest['close'] > prev['close']:
-            score -= 10  # Harga naik tapi OBV turun = divergence negatif
+        # 12. OBV
+        obv_rising = float(latest["obv"]) > float(latest["obv_ma"])
+        if obv_rising and float(latest["close"]) > float(prev["close"]):
+            score += 15; reasons.append("OBV Konfirmasi ✅")
+        elif not obv_rising and float(latest["close"]) > float(prev["close"]):
+            score -= 10
 
-        # 13. Support & Resistance (multi-level pivot)
-        support, resistance, all_supports, all_resistances = StockAnalyzer._find_sr_levels(df)
-        price_now = float(latest['close'])
-        near_support    = price_now <= support * 1.02
-        near_resistance = price_now >= resistance * 0.98
+        # 13. Support & Resistance
+        support, resistance, _, _ = self._find_sr_levels(df)
+        price_now     = float(latest["close"])
+        near_support  = price_now <= support * 1.02
+        near_resist   = price_now >= resistance * 0.98
         if near_support:
-            score += 15
-            reasons.append("Dekat Support 🛡️")
-        if near_resistance:
-            score -= 10  # Dekat resistance = potensi terbentur
+            score += 15; reasons.append("Dekat Support 🛡️")
+        if near_resist:
+            score -= 10
 
         # 14. Gap Detection
-        change_pct = round(((latest['close'] - prev['close']) / prev['close']) * 100, 2)
+        change_pct = round(
+            (float(latest["close"]) - float(prev["close"])) / float(prev["close"]) * 100, 2)
         if change_pct > 1.5:
-            score += 10
-            reasons.append(f"Gap Up {change_pct}%")
+            score += 10; reasons.append(f"Gap Up {change_pct}%")
         elif 0.5 < change_pct < 1.5:
             score += 5
         elif change_pct < -2.0:
-            score -= 15  # Gap down besar = hindari
+            score -= 15
 
-        # 15. RSI Divergence (bullish)
-        if StockAnalyzer._detect_rsi_divergence(df):
-            score += 20
-            reasons.append("RSI Divergence Bullish 🔄")
+        # 15. RSI Divergence
+        if self._detect_rsi_divergence(df):
+            score += 20; reasons.append("RSI Divergence Bullish 🔄")
+
+        # 16-17 sudah handle di pre-filter gates (anti-chasing, spread)
+
+        # 18. MTF Daily Confirmation
+        df_daily = self.fetch_daily(symbol)
+        mtf_trend, mtf_score = self._mtf_confirmation(df_daily)
+        score += mtf_score
+        if mtf_trend == "daily_uptrend":
+            reasons.append("MTF Uptrend ✅")
+        elif mtf_trend == "daily_downtrend":
+            reasons.append("MTF Downtrend ⚠️")
+
+        # 19. Relative Strength vs IHSG
+        rs_stronger, rs_score = self._relative_strength(df, ihsg_chg)
+        score += rs_score
+        if rs_stronger:
+            reasons.append("RS > IHSG 💪")
+
+        # 20. IHSG Correlation penalty
+        if ihsg_chg is not None and ihsg_chg < -1.5:
+            score = int(score * 0.75)
+            logger.info(f"[{symbol}] IHSG penalty applied: {ihsg_chg}%")
 
         logger.info(
             f"[{symbol}] score={score}, threshold={threshold}, "
-            f"market={market}, adx={adx:.1f}, vwap_ok={latest['close'] > latest['vwap']}"
+            f"market={market}, adx={adx:.1f}, mtf={mtf_trend}"
         )
 
-        # ── Threshold ──────────────────────────────────────────────────
         if score < threshold:
             logger.info(f"[{symbol}] TIDAK LOLOS threshold ({score} < {threshold})")
             return None
 
-        # ── Entry, TP, SL — Professional Grade ────────────────────────
-        price    = round(float(latest['close']), 2)
-        atr      = round(float(latest['atr']), 2)
-        vwap_val = round(float(latest['vwap']), 0)
-        bb_lower = round(float(latest['bb_lower']), 0)
+        # ── Entry / TP / SL Professional Grade ────────────────────────
+        price    = round(float(latest["close"]), 2)
+        atr      = round(float(latest["atr"]), 2)
+        vwap_val = round(float(latest["vwap"]), 0)
+        bb_lower = round(float(latest["bb_lower"]), 0)
 
-        # BEST ENTRY — zona ideal (limit order, bukan market)
-        entry_data = StockAnalyzer._calc_best_entry(price, support, vwap_val, bb_lower)
-        best_entry = entry_data['best_entry']
-        entry_type = entry_data['entry_type']
+        entry_data = self._calc_best_entry(price, support, vwap_val, bb_lower)
+        best_entry = entry_data["best_entry"]
+        entry_type = entry_data["entry_type"]
 
-        # SL — swing low terdekat - 0.5% buffer (lebih akurat dari ATR flat)
-        swing_sl    = round(support * 0.995, 0)          # Di bawah support terdekat
-        atr_sl      = round(price - atr * 1.5, 0)        # ATR-based fallback
-        sl          = int(max(swing_sl, atr_sl))          # Ambil yang lebih tinggi (lebih ketat)
-        sl_distance = price - sl
-        if sl_distance <= 0:
-            sl_distance = price * 0.015
+        # SL — swing low - 0.5% buffer vs ATR; ambil yang lebih ketat (lebih tinggi)
+        sl = int(max(round(support * 0.995, 0), round(price - atr * 1.5, 0)))
+        sl_distance = price - sl if price - sl > 0 else price * 0.015
 
-        # TP1 — resistance terdekat (konservatif, take partial profit)
-        tp1_resistance = round(resistance * 0.995, 0)    # Tepat di bawah resistance
-        tp1_atr        = round(price + atr * 1.5, 0)     # ATR minimum
-        tp1            = int(max(tp1_resistance, tp1_atr))
+        # TP1 — resistance terdekat (konservatif)
+        tp1 = int(max(round(resistance * 0.995, 0), round(price + atr * 1.5, 0)))
 
-        # TP2 — Fibonacci 1.618 extension (agresif, biarkan sisa posisi jalan)
-        recent_20      = df.iloc[-20:]
-        swing_low      = float(recent_20['low'].min())
-        swing_high     = float(recent_20['high'].max())
-        fib_tp2        = round(swing_low + (swing_high - swing_low) * 1.618, 0)
-        tp2            = int(fib_tp2) if fib_tp2 > tp1 else int(tp1 * 1.03)
+        # TP2 — Fibonacci 1.618 extension
+        rec20     = df.iloc[-20:]
+        fib_tp2   = round(float(rec20["low"].min()) + (float(rec20["high"].max()) - float(rec20["low"].min())) * 1.618, 0)
+        tp2       = int(fib_tp2) if fib_tp2 > tp1 else int(tp1 * 1.03)
 
-        # RRR dihitung dari best_entry ke TP1
-        entry_to_tp1   = tp1 - best_entry
-        entry_to_sl    = best_entry - sl
-        rrr = round(entry_to_tp1 / entry_to_sl, 2) if entry_to_sl > 0 else 0
+        e2sl = best_entry - sl
+        rrr  = round((tp1 - best_entry) / e2sl, 2) if e2sl > 0 else 0
 
         alasan = " + ".join(reasons) if reasons else "Momentum Bullish"
 
         return {
-            'symbol':           symbol.replace('.JK', ''),
-            'signal_timestamp': latest.name.isoformat(),
-            'price':            int(price),          # Harga pasar saat ini
-            'best_entry':       best_entry,          # ← BARU: zona entry ideal
-            'entry_type':       entry_type,          # ← BARU: market/vwap/support/bb_low
-            'tp1':              tp1,                 # ← BARU: TP konservatif (resistance)
-            'tp2':              tp2,                 # ← BARU: TP agresif (Fibonacci 1.618)
-            'sl':               sl,                  # SL berbasis swing low
-            'rrr':              rrr,
-            'atr':              atr,
-            'support':          int(support),        # ← BARU: level support
-            'resistance':       int(resistance),     # ← BARU: level resistance
-            'adx':              round(float(adx), 1),
-            'vwap':             int(vwap_val),
-            'bb_pct':           round(float(latest['bb_pct']), 2),
-            'bb_lower':         int(bb_lower),
-            'rsi':              round(float(rsi), 1),
-            'stoch_k':          round(float(sk), 1),
-            'macd_hist':        round(float(latest['macd_hist']), 4),
-            'obv_ok':           bool(obv_rising),
-            'near_support':     bool(near_support),
-            'volume_ratio':     round(float(vol_ratio), 1),
-            'volume_real':      int(latest['volume']),
-            'score':            score,
-            'change_pct':       change_pct,
-            'market_cond':      market,
-            'alasan':           alasan,
+            "symbol":            symbol.replace(".JK", ""),
+            "signal_timestamp":  latest.name.isoformat(),
+            "price":             int(price),
+            "best_entry":        best_entry,
+            "entry_type":        entry_type,
+            "tp1":               tp1,
+            "tp2":               tp2,
+            "sl":                sl,
+            "rrr":               rrr,
+            "atr":               atr,
+            "support":           int(support),
+            "resistance":        int(resistance),
+            "adx":               round(adx, 1),
+            "vwap":              int(vwap_val),
+            "bb_pct":            round(float(latest["bb_pct"]), 2),
+            "bb_lower":          int(bb_lower),
+            "rsi":               round(rsi, 1),
+            "stoch_k":           round(sk, 1),
+            "macd_hist":         round(float(latest["macd_hist"]), 4),
+            "obv_ok":            obv_rising,
+            "near_support":      near_support,
+            "volume_ratio":      round(vol_ratio, 1),
+            "volume_real":       int(latest["volume"]),
+            "score":             score,
+            "change_pct":        change_pct,
+            "market_cond":       market,
+            "mtf_trend":         mtf_trend,
+            "rs_stronger":       rs_stronger,
+            "spread_pct":        round(spread, 2),
+            "alasan":            alasan,
         }
