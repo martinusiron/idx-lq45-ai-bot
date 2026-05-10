@@ -13,8 +13,8 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
-SUPABASE_URL              = os.getenv("SUPABASE_URL", "https://bdlmltxzvlxbxzyyvpuw.supabase.co")
-SUPABASE_ANON_KEY         = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_URL              = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "https://bdlmltxzvlxbxzyyvpuw.supabase.co")
+SUPABASE_ANON_KEY         = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 # ── Database (Postgres DSN — opsional, fallback ke Supabase lalu SQLite) ──────
