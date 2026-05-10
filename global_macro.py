@@ -17,7 +17,7 @@ MACRO_TICKERS = {
     "^TNX":     {"label": "US10Y Yield", "type": "yield"},
     "BZ=F":     {"label": "Brent Oil",   "type": "commodity"},
     "^SPGSIK":  {"label": "Nikel",       "type": "commodity"},   # NI=F → S&P GSCI Nickel
-    "^COAL":    {"label": "Batubara",    "type": "commodity"},   # MTF=F → Stowe Coal Index
+    "NCF=F":    {"label": "Batubara",    "type": "commodity"},   # Newcastle Coal Futures
     "^VIX":     {"label": "VIX (Fear)",  "type": "sentiment"},
     "GC=F":     {"label": "Gold",        "type": "commodity"},   # tambahan: Emas (safe haven indicator)
 }

@@ -276,7 +276,7 @@ class TelegramFormatter:
         mapping = {
             "BZ=F":     ("⛽ Minyak",   "BREN, MEDC, ENRG"),
             "^SPGSIK":  ("🪨 Nikel",    "INCO, MDKA, ANTM"),
-            "^COAL":    ("🪵 Batubara", "ADRO, ITMG, PTBA"),
+            "NCF=F":    ("🪵 Batubara", "ADRO, ITMG, PTBA"),
             "GC=F":     ("🥇 Emas",     "ANTM (safe haven)"),
             "DX-Y.NYB": ("💵 DXY",      "Banking, Consumer"),
         }
