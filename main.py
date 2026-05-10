@@ -18,7 +18,7 @@ import json
 import logging
 from datetime import time
 
-from telegram import Update
+from telegram import Update, constants
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, Defaults, filters
@@ -589,6 +589,9 @@ class IDXDayTraderBot:
                 "- 'Saran saya, atur money management-mu dulu sebelum entry. Lebih baik ketinggalan kereta daripada nyangkut di pucuk.'\n"
             )
 
+            # Show typing status in Telegram
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
+
             # Build final prompt with context
             full_prompt = f"{system_prompt}\n\nUser bertanya: {user_text}"
             
@@ -598,8 +601,18 @@ class IDXDayTraderBot:
                 if ihsg:
                     full_prompt += f"\n\nInfo tambahan: IHSG saat ini sedang {ihsg}%."
 
-            response = await asyncio.to_thread(self.model.generate_content, full_prompt)
-            await update.message.reply_text(response.text)
+            # Call Gemini with timeout
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self.model.generate_content, full_prompt),
+                    timeout=30.0
+                )
+                await update.message.reply_text(response.text)
+            except asyncio.TimeoutError:
+                logger.error("Gemini request timed out.")
+                await update.message.reply_text(
+                    "⚠️ Maaf, respon AI terlalu lama. Silakan coba tanya lagi sesaat lagi."
+                )
         except Exception as exc:
             logger.error(f"Gemini error: {exc}")
             # Jangan kirim error ke user agar tidak mengganggu, cukup log saja
