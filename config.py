@@ -15,7 +15,7 @@ GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "https://bdlmltxzvlxbxzyyvpuw.supabase.co")
-SUPABASE_ANON_KEY         = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+SUPABASE_ANON_KEY         = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 # ── Database (Postgres DSN — opsional, fallback ke Supabase lalu SQLite) ──────

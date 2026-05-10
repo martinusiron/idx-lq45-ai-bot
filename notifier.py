@@ -274,10 +274,11 @@ class TelegramFormatter:
         msg += "\n📌 <b>Dampak ke Sektor IDX:</b>\n"
 
         mapping = {
-            "BZ=F":     ("⛽ Minyak",    "BREN, MEDC, ENRG"),
-            "NI=F":     ("🪨 Nikel",     "INCO, MDKA, ANTM"),
-            "MTF=F":    ("🪵 Batubara",  "ADRO, ITMG, PTBA"),
-            "DX-Y.NYB": ("💵 DXY",       "Banking, Consumer"),
+            "BZ=F":     ("⛽ Minyak",   "BREN, MEDC, ENRG"),
+            "^SPGSIK":  ("🪨 Nikel",    "INCO, MDKA, ANTM"),
+            "^COAL":    ("🪵 Batubara", "ADRO, ITMG, PTBA"),
+            "GC=F":     ("🥇 Emas",     "ANTM (safe haven)"),
+            "DX-Y.NYB": ("💵 DXY",      "Banking, Consumer"),
         }
         for ticker, (label, sectors) in mapping.items():
             d = data.get(ticker, {})

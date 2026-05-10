@@ -7,4 +7,4 @@ numpy>=1.26.0
 pytz>=2024.1
 requests>=2.31.0
 psycopg[binary]>=3.1.0
-google-generativeai>=0.7.2
+google-generativeai>=0.7.0

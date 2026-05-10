@@ -49,6 +49,23 @@ try:
 except ImportError:
     print('  ⚠️  psycopg tidak ada (ok jika pakai SQLite/Supabase)')
 "
+echo "  🔍 Checking Gemini model availability..."
+python3 -c "
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+load_dotenv()
+api_key = os.getenv('GEMINI_API_KEY')
+if api_key:
+    genai.configure(api_key=api_key)
+    try:
+        model = genai.get_model('models/gemini-2.5-flash-lite')
+        print('  ✅ Gemini 2.5 Flash Lite: READY')
+    except Exception as e:
+        print(f'  ❌ Gemini 2.5 Flash Lite: NOT FOUND ({e})')
+else:
+    print('  ⚠️  GEMINI_API_KEY tidak ditemukan di .env')
+"
 
 # ── 6. Setup data directory ───────────────────────────────────────────
 echo ""
