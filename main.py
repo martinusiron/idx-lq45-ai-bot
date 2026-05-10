@@ -19,7 +19,11 @@ import logging
 from datetime import time
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Defaults
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, Defaults, filters
+)
+import google.generativeai as genai
 
 from analyzer import StockAnalyzer
 from config import (
@@ -28,7 +32,7 @@ from config import (
     MIN_RRR, PARTIAL_EXIT_RATIO, RISK_OFF_MODE, RISK_OFF_SIZE_MULTIPLIER,
     RISK_PER_TRADE_PCT, SELL_FEE_PCT, SLIPPAGE_PCT,
     SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, TELEGRAM_CHAT_ID,
-    TELEGRAM_TOKEN, TIMEZONE,
+    TELEGRAM_TOKEN, TIMEZONE, GEMINI_API_KEY,
 )
 from global_macro import GlobalMacroAnalyzer
 from market_calendar import is_trading_day, is_safe_trading_time
@@ -75,6 +79,17 @@ class IDXDayTraderBot:
         self.formatter = TelegramFormatter()
         self.tz        = self.session.tz
         self.monitor   = None  # init after app build
+
+        # Gemini AI Assistant
+        self.ai_active = False
+        if GEMINI_API_KEY:
+            try:
+                genai.configure(api_key=GEMINI_API_KEY)
+                self.model = genai.GenerativeModel('gemini-1.5-flash')
+                self.ai_active = True
+                logger.info("✅ Gemini AI Assistant aktif.")
+            except Exception as e:
+                logger.warning(f"⚠️ Gagal inisialisasi Gemini: {e}")
 
     # ------------------------------------------------------------------ #
     #  HELPERS
@@ -536,6 +551,59 @@ class IDXDayTraderBot:
             )
         await update.message.reply_text(msg, parse_mode="HTML")
 
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle non-command messages using Gemini AI."""
+        if not self.ai_active:
+            # Jika AI tidak aktif, jangan respon chat biasa agar tidak spam
+            return
+
+        user_text = update.message.text
+        if not user_text:
+            return
+
+        # Hanya respon di private chat atau jika bot di-mention (jika di grup)
+        # Untuk kesederhanaan, kita respon semua text di chat yang terdaftar
+        
+        logger.info(f"AI Chat request from {update.effective_user.first_name}: {user_text[:50]}...")
+        
+        try:
+            # Enhanced System Prompt
+            system_prompt = (
+                "Role & Personality:\n"
+                "Anda adalah IDX Day Trader Assistant (Enhanced), seorang asisten cerdas dan analis teknikal pro "
+                "untuk pasar saham Bursa Efek Indonesia (BEI). Kepribadian Anda adalah campuran antara trader senior "
+                "yang bijak, santai, namun sangat presisi. Gunakan bahasa Indonesia yang modern, sering gunakan "
+                "istilah trading yang umum (seperti support, resistance, breakout, cut loss), namun tetap profesional.\n\n"
+                "Core Tasks:\n"
+                "1. Analisa Teknikal: Membantu memetakan support/resistance, indikator (MA, RSI, MACD), & pola grafik.\n"
+                "2. Edukasi & Strategi: Menjelaskan konsep day trading, swing trading, risk management, & psikologi.\n"
+                "3. Navigasi Bot: Menjelaskan fitur bot ini (cek harga, alert, baca chart).\n"
+                "4. Sentimen Pasar: Rangkuman sentimen harian atau berita emiten BEI.\n\n"
+                "Operational Guidelines:\n"
+                "- Disclaimer (Wajib): Selalu sertakan bahwa ini bukan ajakan beli/jual. Gunakan frasa: 'Ingat, ini hanya opini untuk bahan pertimbangan, keputusan ada di tanganmu (DYOR - Do Your Own Research).'\n"
+                "- Manajemen Risiko: Selalu tekankan pentingnya Stop Loss.\n"
+                "- Saham Gorengan: Berikan peringatan ekstra risiko volatilitas untuk saham tidak likuid.\n"
+                "- Interaksi: Tetap di topik trading saham BEI.\n\n"
+                "Contoh Gaya Bahasa:\n"
+                "- 'Wah, $BBRI lagi ngetes resistance kuat di area 5500 nih. Kalau kuat breakout, potensinya lanjut, tapi jangan lupa jaga jempol di tombol sell kalau balik arah ya!'\n"
+                "- 'Saran saya, atur money management-mu dulu sebelum entry. Lebih baik ketinggalan kereta daripada nyangkut di pucuk.'\n"
+            )
+
+            # Build final prompt with context
+            full_prompt = f"{system_prompt}\n\nUser bertanya: {user_text}"
+            
+            # Tambahkan info market jika perlu
+            if any(k in user_text.lower() for k in ["market", "ihsg", "bursa"]):
+                ihsg = await self._get_ihsg_async()
+                if ihsg:
+                    full_prompt += f"\n\nInfo tambahan: IHSG saat ini sedang {ihsg}%."
+
+            response = await asyncio.to_thread(self.model.generate_content, full_prompt)
+            await update.message.reply_text(response.text)
+        except Exception as exc:
+            logger.error(f"Gemini error: {exc}")
+            # Jangan kirim error ke user agar tidak mengganggu, cukup log saja
+
     # ------------------------------------------------------------------ #
     #  MAIN RUNNER
     # ------------------------------------------------------------------ #
@@ -559,6 +627,9 @@ class IDXDayTraderBot:
             ("watchlist", self.cmd_watchlist),
         ]:
             app.add_handler(CommandHandler(cmd, fn))
+
+        # Generic message handler for AI Chat
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         jq = app.job_queue
         jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(0, 1, 2, 3, 4))
