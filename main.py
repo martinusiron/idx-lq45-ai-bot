@@ -604,8 +604,8 @@ class IDXDayTraderBot:
             # Call Gemini with timeout
             try:
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(self.model.generate_content, full_prompt),
-                    timeout=30.0
+                    asyncio.to_thread(self.model.generate_content, full_prompt, request_options={"timeout": 60}),
+                    timeout=65.0
                 )
                 await update.message.reply_text(response.text)
             except asyncio.TimeoutError:
