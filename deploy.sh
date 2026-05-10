@@ -31,7 +31,7 @@ pip uninstall pandas-ta pandas_ta pandas-ta-classic -y 2>/dev/null || true
 # ── 4. Install dependencies ───────────────────────────────────────────
 echo ""
 echo "[4] Install dependencies..."
-pip install -r requirements.txt --quiet
+pip install --upgrade -r requirements.txt --quiet
 pip install ta --quiet  # eksplisit — kadang tidak ter-install via requirements
 
 # ── 5. Verifikasi library ─────────────────────────────────────────────
