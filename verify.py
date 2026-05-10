@@ -65,7 +65,7 @@ def env_check(key, secret=False):
 
 check("TELEGRAM_TOKEN",          lambda: env_check("TELEGRAM_TOKEN", secret=True))
 check("TELEGRAM_CHAT_ID",        lambda: env_check("TELEGRAM_CHAT_ID"))
-check("NEXT_PUBLIC_SUPABASE_URL", lambda: env_check("NEXT_PUBLIC_SUPABASE_URL"))
+check("SUPABASE_URL", lambda: env_check("SUPABASE_URL"))
 check("SUPABASE_SERVICE_ROLE_KEY", lambda: env_check("SUPABASE_SERVICE_ROLE_KEY", secret=True))
 check("ACCOUNT_SIZE",            lambda: env_check("ACCOUNT_SIZE"), fatal=False)
 check("RISK_PER_TRADE_PCT",      lambda: env_check("RISK_PER_TRADE_PCT"), fatal=False)
