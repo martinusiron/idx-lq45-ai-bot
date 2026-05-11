@@ -1,44 +1,39 @@
 """
-Patch untuk main.py di repo — menambahkan:
-1. import market_calendar, monitor
-2. IHSG fetch sebelum scan
-3. Monitor background task
-4. /performa command
-5. /setmodal & /setrisk command
-6. Market calendar check di job_morning_signal & job_afternoon_update
-7. Safe trading time warning di cmd_signal
-
-Cara pakai:
-  Ganti seluruh main.py di repo dengan file ini.
+main.py — IDX Day Trader Bot v5
+Sprint 1: Multi-turn memory + Chart Vision + Price Alert
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from datetime import time
 
+import google.generativeai as genai
 from telegram import Update, constants
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, Defaults, filters
+    ApplicationBuilder, CommandHandler, ContextTypes,
+    Defaults, MessageHandler, filters,
 )
-import google.generativeai as genai
 
 from analyzer import StockAnalyzer
+from chart_vision import analyze_chart_image
 from config import (
     ACCOUNT_SIZE, BUY_FEE_PCT, DATABASE_URL, DAILY_MAX_LOSS_R, DB_PATH,
-    HIGH_PROB_THRESHOLD, LOT_SIZE, LQ45_SYMBOLS, MAX_OPEN_POSITIONS,
-    MIN_RRR, PARTIAL_EXIT_RATIO, RISK_OFF_MODE, RISK_OFF_SIZE_MULTIPLIER,
-    RISK_PER_TRADE_PCT, SELL_FEE_PCT, SLIPPAGE_PCT,
+    GEMINI_API_KEY, HIGH_PROB_THRESHOLD, LOT_SIZE, LQ45_SYMBOLS,
+    MAX_OPEN_POSITIONS, MIN_RRR, PARTIAL_EXIT_RATIO, RISK_OFF_MODE,
+    RISK_OFF_SIZE_MULTIPLIER, RISK_PER_TRADE_PCT, SELL_FEE_PCT, SLIPPAGE_PCT,
     SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, TELEGRAM_CHAT_ID,
-    TELEGRAM_TOKEN, TIMEZONE, GEMINI_API_KEY,
+    TELEGRAM_TOKEN, TIMEZONE,
 )
+from conversation_store import ConversationStore
 from global_macro import GlobalMacroAnalyzer
 from market_calendar import is_trading_day, is_safe_trading_time
 from market_session import IDXMarketSession
 from monitor import SignalMonitor
 from notifier import TelegramFormatter
+from price_alert import PriceAlertManager
 from risk import RiskEngine
 from storage import TradingStorage
 
@@ -51,12 +46,11 @@ logger = logging.getLogger(__name__)
 
 class IDXDayTraderBot:
     def __init__(self) -> None:
-        self.analyzer = StockAnalyzer()
-        self.macro    = GlobalMacroAnalyzer()
-        self.session  = IDXMarketSession(TIMEZONE)
-        self.storage  = TradingStorage(
-            sqlite_path=DB_PATH,
-            database_url=DATABASE_URL,
+        self.analyzer  = StockAnalyzer()
+        self.macro     = GlobalMacroAnalyzer()
+        self.session   = IDXMarketSession(TIMEZONE)
+        self.storage   = TradingStorage(
+            sqlite_path=DB_PATH, database_url=DATABASE_URL,
             supabase_url=SUPABASE_URL,
             supabase_service_role_key=SUPABASE_SERVICE_ROLE_KEY,
         )
@@ -64,32 +58,28 @@ class IDXDayTraderBot:
         self.storage.healthcheck()
 
         self.risk = RiskEngine(
-            account_size=ACCOUNT_SIZE,
-            risk_per_trade_pct=RISK_PER_TRADE_PCT,
-            daily_max_loss_r=DAILY_MAX_LOSS_R,
-            max_open_positions=MAX_OPEN_POSITIONS,
-            lot_size=LOT_SIZE,
-            buy_fee_pct=BUY_FEE_PCT,
-            sell_fee_pct=SELL_FEE_PCT,
-            slippage_pct=SLIPPAGE_PCT,
-            partial_exit_ratio=PARTIAL_EXIT_RATIO,
-            risk_off_mode=RISK_OFF_MODE,
-            risk_off_size_multiplier=RISK_OFF_SIZE_MULTIPLIER,
+            account_size=ACCOUNT_SIZE, risk_per_trade_pct=RISK_PER_TRADE_PCT,
+            daily_max_loss_r=DAILY_MAX_LOSS_R, max_open_positions=MAX_OPEN_POSITIONS,
+            lot_size=LOT_SIZE, buy_fee_pct=BUY_FEE_PCT, sell_fee_pct=SELL_FEE_PCT,
+            slippage_pct=SLIPPAGE_PCT, partial_exit_ratio=PARTIAL_EXIT_RATIO,
+            risk_off_mode=RISK_OFF_MODE, risk_off_size_multiplier=RISK_OFF_SIZE_MULTIPLIER,
         )
-        self.formatter = TelegramFormatter()
-        self.tz        = self.session.tz
-        self.monitor   = None  # init after app build
+        self.formatter   = TelegramFormatter()
+        self.tz          = self.session.tz
+        self.conv_store  = ConversationStore()         # ← Sprint 1: memory
+        self.alert_mgr   = None                        # ← Sprint 1: price alert (init after app)
+        self.monitor     = None
+        self.ai_active   = False
+        self.model       = None
 
-        # Gemini AI Assistant
-        self.ai_active = False
         if GEMINI_API_KEY:
             try:
                 genai.configure(api_key=GEMINI_API_KEY)
-                self.model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                self.model     = genai.GenerativeModel("gemini-2.5-flash-lite")
                 self.ai_active = True
-                logger.info("✅ Gemini AI Assistant aktif.")
-            except Exception as e:
-                logger.warning(f"⚠️ Gagal inisialisasi Gemini: {e}")
+                logger.info("✅ Gemini AI aktif (gemini-2.5-flash-lite)")
+            except Exception as exc:
+                logger.warning(f"⚠️ Gemini init gagal: {exc}")
 
     # ------------------------------------------------------------------ #
     #  HELPERS
@@ -101,28 +91,16 @@ class IDXDayTraderBot:
         return self.session.is_regular_session()
 
     def _market_closed_message(self) -> str:
-        status = self.session.get_status()
-        if status == "lunch_break":
-            return (
-                "⏸️ Bursa IDX sedang jeda siang.\n"
-                "Senin–Kamis 09:00–12:00 & 13:30–15:49 WIB, "
-                "Jumat 09:00–11:30 & 14:00–15:49 WIB."
-            )
-        return (
-            "⏰ Bursa IDX sedang tutup.\n"
-            "Senin–Kamis 09:00–12:00 & 13:30–15:49 WIB, "
-            "Jumat 09:00–11:30 & 14:00–15:49 WIB."
-        )
+        if self.session.get_status() == "lunch_break":
+            return "⏸️ Bursa IDX sedang jeda siang."
+        return "⏰ Bursa IDX sedang tutup."
 
-    def _analyze_one(
-        self, sym: str, threshold: int,
-        strict_filter: bool = True, ihsg_chg: float | None = None
-    ) -> dict | None:
+    def _analyze_one(self, sym: str, threshold: int,
+                     strict_filter: bool = True,
+                     ihsg_chg: float | None = None) -> dict | None:
         try:
-            res = self.analyzer.analyze(
-                sym, threshold=threshold,
-                strict_filter=strict_filter, ihsg_chg=ihsg_chg
-            )
+            res = self.analyzer.analyze(sym, threshold=threshold,
+                                        strict_filter=strict_filter, ihsg_chg=ihsg_chg)
             if strict_filter and res and res.get("rrr", 0) < MIN_RRR:
                 return None
             return res
@@ -130,26 +108,20 @@ class IDXDayTraderBot:
             logger.warning(f"[{sym}] analyze error: {exc}")
             return None
 
-    async def _scan_async(
-        self, symbols: list[str], threshold: int,
-        strict_filter: bool = True, ihsg_chg: float | None = None
-    ) -> list[dict]:
+    async def _scan_async(self, symbols: list[str], threshold: int,
+                          strict_filter: bool = True,
+                          ihsg_chg: float | None = None) -> list[dict]:
         loop    = asyncio.get_event_loop()
-        tasks   = [
-            loop.run_in_executor(None, self._analyze_one, s, threshold, strict_filter, ihsg_chg)
-            for s in symbols
-        ]
+        tasks   = [loop.run_in_executor(None, self._analyze_one, s, threshold, strict_filter, ihsg_chg) for s in symbols]
         results = await asyncio.gather(*tasks)
         signals = [r for r in results if r is not None]
         return sorted(signals, key=lambda x: x["score"], reverse=True)
 
     async def _get_macro_async(self) -> dict:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.macro.get_macro_context)
+        return await asyncio.get_event_loop().run_in_executor(None, self.macro.get_macro_context)
 
     async def _get_ihsg_async(self) -> float | None:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.analyzer.fetch_ihsg)
+        return await asyncio.get_event_loop().run_in_executor(None, self.analyzer.fetch_ihsg)
 
     def _build_trade_plans(self, signals: list[dict], macro: dict) -> list[dict]:
         trade_date = self._trade_date()
@@ -164,25 +136,18 @@ class IDXDayTraderBot:
             if signal["symbol"] in finalized:
                 continue
             plan, reason = self.risk.plan_position(
-                entry=signal["best_entry"],
-                stop=signal["sl"],
-                open_positions=len(plans),
-                realized_r=realized_r,
-                risk_off=risk_off,
+                entry=signal["best_entry"], stop=signal["sl"],
+                open_positions=len(plans), realized_r=realized_r, risk_off=risk_off,
             )
             if plan is None:
                 logger.info(f"[{signal['symbol']}] plan skipped: {reason}")
                 continue
             plans.append({
                 **signal,
-                "trade_date":      trade_date,
-                "risk_off":        risk_off,
-                "qty":             plan.qty,
-                "lot_count":       plan.lot_count,
-                "risk_amount":     plan.risk_amount,
-                "planned_notional": plan.planned_notional,
-                "size_mode":       plan.size_mode,
-                "size_notes":      plan.notes,
+                "trade_date": trade_date, "risk_off": risk_off,
+                "qty": plan.qty, "lot_count": plan.lot_count,
+                "risk_amount": plan.risk_amount, "planned_notional": plan.planned_notional,
+                "size_mode": plan.size_mode, "size_notes": plan.notes,
                 "analyzer_snapshot": json.dumps(signal, default=str),
             })
         self.storage.replace_trade_plans(trade_date, plans)
@@ -195,35 +160,27 @@ class IDXDayTraderBot:
             if df is None:
                 continue
             result = self.risk.evaluate_trade(
-                candles=df,
-                signal_timestamp=trade["signal_timestamp"],
-                entry=float(trade["planned_entry"]),
-                stop=float(trade["sl"]),
-                tp1=float(trade["tp1"]),
-                tp2=float(trade["tp2"]),
-                qty=int(trade["qty"]),
-                finalize=finalize,
+                candles=df, signal_timestamp=trade["signal_timestamp"],
+                entry=float(trade["planned_entry"]), stop=float(trade["sl"]),
+                tp1=float(trade["tp1"]), tp2=float(trade["tp2"]),
+                qty=int(trade["qty"]), finalize=finalize,
             )
             self.storage.update_trade_result(trade["trade_date"], trade["symbol"], result)
             updates.append({**trade, **result})
         return updates
 
     async def _send_trade_update(self, reply_fn, trade_date: str, finalize: bool, empty_msg: str):
-        trades = self.storage.get_active_trade_plans(trade_date)
-        if not trades:
-            trades = self.storage.get_trade_plans(trade_date, include_finalized=True)
+        trades = self.storage.get_active_trade_plans(trade_date) or \
+                 self.storage.get_trade_plans(trade_date, include_finalized=True)
         if not trades:
             await reply_fn(empty_msg)
             return
         updates = self._evaluate_trades(trades, finalize=finalize)
         if not updates:
-            await reply_fn("Gagal mengambil data terkini. Coba lagi sesaat.")
+            await reply_fn("Gagal mengambil data terkini.")
             return
         summary = self.storage.get_today_summary(trade_date)
-        await reply_fn(
-            self.formatter.format_afternoon_update(updates, summary=summary),
-            parse_mode="HTML",
-        )
+        await reply_fn(self.formatter.format_afternoon_update(updates, summary=summary), parse_mode="HTML")
 
     # ------------------------------------------------------------------ #
     #  SCHEDULER JOBS
@@ -231,100 +188,86 @@ class IDXDayTraderBot:
     async def job_morning_signal(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = self.session.now()
         if not is_trading_day(now.date()):
-            logger.info("Hari libur IDX — job pagi dilewati.")
             return
-
-        logger.info("🌅 Job pagi: mencari sinyal...")
+        logger.info("🌅 Job pagi...")
         try:
             macro_task = self._get_macro_async()
             ihsg_task  = self._get_ihsg_async()
             macro, ihsg_chg = await asyncio.gather(macro_task, ihsg_task)
+            signals = await self._scan_async(LQ45_SYMBOLS, HIGH_PROB_THRESHOLD, True, ihsg_chg)
 
-            signals = await self._scan_async(
-                LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD,
-                strict_filter=True, ihsg_chg=ihsg_chg,
-            )
-
-            async def send(text, **kw):
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, **kw)
-
+            async def send(t, **kw): await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=t, **kw)
             await send(self.formatter.format_macro_context(macro), parse_mode="HTML")
-
             if not signals:
-                await send(
-                    f"📭 Tidak ada setup yang memenuhi kriteria hari ini\n"
-                    f"(Skor ≥ {HIGH_PROB_THRESHOLD} & RRR ≥ {MIN_RRR})."
-                )
+                await send(f"📭 Tidak ada setup hari ini (Skor≥{HIGH_PROB_THRESHOLD} & RRR≥{MIN_RRR}).")
                 return
-
             plans = self._build_trade_plans(signals, macro)
             if plans:
                 await send(self.formatter.format_morning_signal(plans), parse_mode="HTML")
-                logger.info(f"✅ {len(plans)} trade plan tersimpan.")
-            else:
-                await send("📭 Tidak ada trade plan yang lolos risk engine hari ini.")
         except Exception as exc:
-            logger.error(f"job_morning_signal error: {exc}")
+            logger.error(f"job_morning_signal: {exc}")
 
     async def job_afternoon_update(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = self.session.now()
         if not is_trading_day(now.date()):
             return
-
-        logger.info("🌇 Job sore: update journal...")
+        logger.info("🌇 Job sore...")
         try:
             trade_date = self._trade_date()
-            trades     = self.storage.get_active_trade_plans(trade_date)
-            if not trades:
+            if not self.storage.get_active_trade_plans(trade_date):
                 return
-
             macro = await self._get_macro_async()
-
-            async def send(text, **kw):
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, **kw)
-
+            async def send(t, **kw): await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=t, **kw)
             await send(self.formatter.format_macro_context(macro), parse_mode="HTML")
-            await self._send_trade_update(
-                reply_fn=send, trade_date=trade_date,
-                finalize=True, empty_msg="📭 Belum ada trade plan aktif hari ini.",
-            )
+            await self._send_trade_update(send, trade_date, finalize=True,
+                                          empty_msg="📭 Tidak ada trade plan aktif.")
         except Exception as exc:
-            logger.error(f"job_afternoon_update error: {exc}")
+            logger.error(f"job_afternoon_update: {exc}")
 
     # ------------------------------------------------------------------ #
     #  COMMAND HANDLERS
     # ------------------------------------------------------------------ #
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "🤖 <b>IDX Day Trader Assistant</b>\n\n"
-            "📋 <b>Command tersedia:</b>\n"
-            "/signal     — Trade plan saham hari ini\n"
-            "/update     — Status fill/P&L hari ini\n"
-            "/detail &lt;KODE&gt; — Analisa mendalam satu saham\n"
-            "/top        — Saham paling aktif LQ45\n"
+            "🤖 <b>IDX Day Trader Assistant — DUKUN KEUANGAN</b>\n\n"
+            "📋 <b>Command Trading:</b>\n"
+            "/signal     — Trade plan LQ45 hari ini\n"
+            "/update     — Status P&L trade aktif\n"
+            "/detail &lt;KODE&gt; — Analisa mendalam saham\n"
+            "/top        — Top volume & gainers LQ45\n"
             "/macro      — Kondisi makro global\n"
-            "/performa   — Win rate & history 30 hari\n"
-            "/watchlist  — Daftar pantau kamu\n"
-            "/watch &lt;KODE&gt;   — Tambah ke watchlist\n"
-            "/unwatch &lt;KODE&gt; — Hapus dari watchlist\n"
-            "/setmodal &lt;juta&gt; — Set modal (cth: /setmodal 10)\n"
-            "/setrisk &lt;pct&gt;  — Set risk/trade (cth: /setrisk 1.0)\n"
-            "/help       — Menu ini\n\n"
-            "⏰ <b>Scheduler Otomatis:</b>\n"
-            "  09:25 WIB — Sinyal pagi + makro\n"
-            "  15:25 WIB — Update P/L + makro\n"
-            "  Setiap 15 menit — Monitor TP/SL\n\n"
-            "<i>⚠️ Bukan ajakan/rekomendasi finansial.</i>",
+            "/performa   — Win rate & history 30 hari\n\n"
+            "🔔 <b>Price Alert:</b>\n"
+            "/alert &lt;KODE&gt; &lt;HARGA&gt; [atas/bawah] — Set alert\n"
+            "/alerts     — Lihat semua alert aktif\n"
+            "/delalert &lt;KODE&gt; — Hapus alert saham\n\n"
+            "📋 <b>Watchlist:</b>\n"
+            "/watchlist  — Daftar pantau\n"
+            "/watch &lt;KODE&gt; — Tambah ke watchlist\n"
+            "/unwatch &lt;KODE&gt; — Hapus dari watchlist\n\n"
+            "⚙️ <b>Pengaturan:</b>\n"
+            "/setmodal &lt;juta&gt; — Set modal trading\n"
+            "/setrisk &lt;pct&gt;  — Set risk per trade\n"
+            "/reset      — Reset memory percakapan AI\n\n"
+            "🤖 <b>AI Chat:</b>\n"
+            "Kirim pesan atau pertanyaan trading langsung!\n"
+            "📸 Kirim screenshot chart untuk analisa visual!\n\n"
+            "⏰ <b>Scheduler:</b> 09:25 & 15:25 WIB (auto)\n"
+            "<i>⚠️ Bukan rekomendasi finansial.</i>",
             parse_mode="HTML",
         )
 
+    async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reset conversation memory user."""
+        user_id = str(update.effective_user.id)
+        self.conv_store.clear(user_id)
+        await update.message.reply_text("🔄 Memory percakapan direset. Mulai sesi baru!")
+
     async def cmd_macro(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("🌍 Mengambil data makro global...")
+        await update.message.reply_text("🌍 Mengambil data makro...")
         try:
             macro = await self._get_macro_async()
-            await update.message.reply_text(
-                self.formatter.format_macro_standalone(macro), parse_mode="HTML"
-            )
+            await update.message.reply_text(self.formatter.format_macro_standalone(macro), parse_mode="HTML")
         except Exception as exc:
             logger.error(f"cmd_macro: {exc}")
             await update.message.reply_text("⚠️ Gagal mengambil data makro.")
@@ -339,125 +282,80 @@ class IDXDayTraderBot:
             return
         if not is_safe_trading_time(now.hour, now.minute):
             await update.message.reply_text(
-                "⚠️ <b>Waktu kurang ideal untuk entry:</b>\n"
-                "• Pre-opening (sebelum 09:15) — harga belum stabil\n"
-                "• Jeda sesi (12:00–13:45) — volume tipis\n"
-                "• Pre-closing (setelah 14:55) — matching period\n\n"
+                "⚠️ <b>Waktu kurang ideal untuk entry.</b>\n"
                 "Sinyal tetap ditampilkan untuk referensi.",
                 parse_mode="HTML",
             )
-
-        await update.message.reply_text("🔎 Menganalisa LQ45 + makro, mohon tunggu ~20 detik...")
-
+        await update.message.reply_text("🔎 Menganalisa LQ45 + makro, tunggu ~20 detik...")
         macro_task = self._get_macro_async()
         ihsg_task  = self._get_ihsg_async()
         macro, ihsg_chg = await asyncio.gather(macro_task, ihsg_task)
-
-        signals = await self._scan_async(
-            LQ45_SYMBOLS, threshold=HIGH_PROB_THRESHOLD,
-            strict_filter=True, ihsg_chg=ihsg_chg,
-        )
-
-        await update.message.reply_text(
-            self.formatter.format_macro_context(macro), parse_mode="HTML"
-        )
-
+        signals = await self._scan_async(LQ45_SYMBOLS, HIGH_PROB_THRESHOLD, True, ihsg_chg)
+        await update.message.reply_text(self.formatter.format_macro_context(macro), parse_mode="HTML")
         if not signals:
-            await update.message.reply_text(
-                f"📭 Tidak ada setup memenuhi kriteria\n(Skor≥{HIGH_PROB_THRESHOLD} & RRR≥{MIN_RRR})."
-            )
+            await update.message.reply_text(f"📭 Tidak ada setup (Skor≥{HIGH_PROB_THRESHOLD} & RRR≥{MIN_RRR}).")
             return
-
         plans = self._build_trade_plans(signals, macro)
         if plans:
-            await update.message.reply_text(
-                self.formatter.format_morning_signal(plans), parse_mode="HTML"
-            )
+            await update.message.reply_text(self.formatter.format_morning_signal(plans), parse_mode="HTML")
         else:
-            await update.message.reply_text("📭 Tidak ada trade plan yang lolos risk engine.")
+            await update.message.reply_text("📭 Tidak ada trade plan lolos risk engine.")
 
     async def cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("⏳ Menghitung P/L + update makro...")
+        await update.message.reply_text("⏳ Menghitung P/L...")
         trade_date = self._trade_date()
         macro      = await self._get_macro_async()
-
-        await update.message.reply_text(
-            self.formatter.format_macro_context(macro), parse_mode="HTML"
-        )
+        await update.message.reply_text(self.formatter.format_macro_context(macro), parse_mode="HTML")
         await self._send_trade_update(
-            reply_fn=update.message.reply_text,
-            trade_date=trade_date,
-            finalize=False,
-            empty_msg="📭 Belum ada trade plan aktif hari ini. Jalankan /signal terlebih dahulu.",
+            update.message.reply_text, trade_date, finalize=False,
+            empty_msg="📭 Belum ada trade plan. Jalankan /signal dulu.",
         )
 
     async def cmd_detail(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            await update.message.reply_text("⚠️ Format salah. Contoh: /detail BBCA")
+            await update.message.reply_text("⚠️ Contoh: /detail BBCA")
             return
         symbol = context.args[0].upper().replace(".JK", "")
-        await update.message.reply_text(f"🔬 Menganalisa {symbol} + makro...")
-
+        await update.message.reply_text(f"🔬 Menganalisa {symbol}...")
         try:
-            loop       = asyncio.get_event_loop()
-            macro_task = self._get_macro_async()
-            ihsg_task  = self._get_ihsg_async()
-            macro, ihsg_chg = await asyncio.gather(macro_task, ihsg_task)
-
-            res = await loop.run_in_executor(
-                None, self._analyze_one, symbol, 0, False, ihsg_chg
-            )
-
-            await update.message.reply_text(
-                self.formatter.format_macro_context(macro), parse_mode="HTML"
-            )
+            loop    = asyncio.get_event_loop()
+            macro_t = self._get_macro_async()
+            ihsg_t  = self._get_ihsg_async()
+            macro, ihsg_chg = await asyncio.gather(macro_t, ihsg_t)
+            res = await loop.run_in_executor(None, self._analyze_one, symbol, 0, False, ihsg_chg)
+            await update.message.reply_text(self.formatter.format_macro_context(macro), parse_mode="HTML")
             if res:
-                await update.message.reply_text(
-                    self.formatter.format_detail(res), parse_mode="HTML"
-                )
+                await update.message.reply_text(self.formatter.format_detail(res), parse_mode="HTML")
             else:
-                await update.message.reply_text(
-                    f"❌ Data {symbol} tidak ditemukan.\n"
-                    "Pastikan kode saham benar (contoh: BBCA, TLKM, GOTO)."
-                )
+                await update.message.reply_text(f"❌ Data {symbol} tidak ditemukan.")
         except Exception as exc:
             logger.error(f"cmd_detail [{symbol}]: {exc}")
             await update.message.reply_text(f"⚠️ Error saat menganalisa {symbol}.")
 
     async def cmd_top(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("📊 Memindai LQ45 + makro, mohon tunggu ~20 detik...")
+        await update.message.reply_text("📊 Memindai LQ45, tunggu ~20 detik...")
         try:
-            macro_task = self._get_macro_async()
-            ihsg_task  = self._get_ihsg_async()
-            macro, ihsg_chg = await asyncio.gather(macro_task, ihsg_task)
-
-            all_data = await self._scan_async(
-                LQ45_SYMBOLS, threshold=0, strict_filter=True, ihsg_chg=ihsg_chg
-            )
-
-            await update.message.reply_text(
-                self.formatter.format_macro_context(macro), parse_mode="HTML"
-            )
+            macro_t = self._get_macro_async()
+            ihsg_t  = self._get_ihsg_async()
+            macro, ihsg_chg = await asyncio.gather(macro_t, ihsg_t)
+            all_data = await self._scan_async(LQ45_SYMBOLS, 0, True, ihsg_chg)
+            await update.message.reply_text(self.formatter.format_macro_context(macro), parse_mode="HTML")
             if not all_data:
-                await update.message.reply_text("📭 Tidak ada data lolos filter saat ini.")
+                await update.message.reply_text("📭 Tidak ada data lolos filter.")
                 return
-
             top_vol     = sorted(all_data, key=lambda x: x["volume_ratio"], reverse=True)[:3]
             top_gainers = sorted(all_data, key=lambda x: x["change_pct"],   reverse=True)[:3]
-            await update.message.reply_text(
-                self.formatter.format_top(top_vol, top_gainers), parse_mode="HTML"
-            )
+            await update.message.reply_text(self.formatter.format_top(top_vol, top_gainers), parse_mode="HTML")
         except Exception as exc:
             logger.error(f"cmd_top: {exc}")
-            await update.message.reply_text("⚠️ Error saat memindai saham.")
+            await update.message.reply_text("⚠️ Error saat memindai.")
 
     async def cmd_performa(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("📈 Mengambil data performa 30 hari...")
+        await update.message.reply_text("📈 Mengambil data performa...")
         try:
             history = self.storage.get_closed_trades(days=30)
             await update.message.reply_text(
-                self.formatter.format_performance(history, period_days=30),
-                parse_mode="HTML",
+                self.formatter.format_performance(history, period_days=30), parse_mode="HTML"
             )
         except Exception as exc:
             logger.error(f"cmd_performa: {exc}")
@@ -465,39 +363,27 @@ class IDXDayTraderBot:
 
     async def cmd_setmodal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            size = self.risk.account_size
-            await update.message.reply_text(
-                f"💰 Modal saat ini: Rp {size/1_000_000:.0f} juta\n"
-                "Ubah: /setmodal 10  (= Rp 10 juta)"
-            )
+            await update.message.reply_text(f"💰 Modal: Rp {self.risk.account_size/1e6:.0f}jt\nUbah: /setmodal 10")
             return
         try:
-            juta = float(context.args[0])
-            self.risk.account_size = juta * 1_000_000
-            await update.message.reply_text(
-                f"✅ Modal diset ke <b>Rp {juta:.0f} juta</b>", parse_mode="HTML"
-            )
+            self.risk.account_size = float(context.args[0]) * 1_000_000
+            await update.message.reply_text(f"✅ Modal: <b>Rp {context.args[0]} juta</b>", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("⚠️ Format salah. Contoh: /setmodal 10")
+            await update.message.reply_text("⚠️ Format: /setmodal 10")
 
     async def cmd_setrisk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            await update.message.reply_text(
-                f"⚡ Risk/trade saat ini: {self.risk.risk_per_trade_pct*100:.2f}%\n"
-                "Ubah: /setrisk 1.0  (= 1%)"
-            )
+            await update.message.reply_text(f"⚡ Risk: {self.risk.risk_per_trade_pct*100:.2f}%\nUbah: /setrisk 1.0")
             return
         try:
             pct = float(context.args[0])
             if not 0.1 <= pct <= 5:
-                await update.message.reply_text("⚠️ Risk harus antara 0.1%–5%")
+                await update.message.reply_text("⚠️ Risk harus 0.1%–5%")
                 return
             self.risk.risk_per_trade_pct = pct / 100
-            await update.message.reply_text(
-                f"✅ Risk/trade diset ke <b>{pct}%</b>", parse_mode="HTML"
-            )
+            await update.message.reply_text(f"✅ Risk: <b>{pct}%</b>", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("⚠️ Format salah. Contoh: /setrisk 1.0")
+            await update.message.reply_text("⚠️ Format: /setrisk 1.0")
 
     # ── Watchlist ───────────────────────────────────────────────────────
     async def cmd_watch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -509,12 +395,11 @@ class IDXDayTraderBot:
         wl      = self.storage.get_watchlist(user_id)
         if symbol in wl:
             await update.message.reply_text(f"⚠️ {symbol} sudah ada.")
-            return
-        if len(wl) >= 10:
-            await update.message.reply_text("Watchlist penuh (maks 10). Hapus dengan /unwatch.")
-            return
-        self.storage.add_to_watchlist(user_id, symbol)
-        await update.message.reply_text(f"✅ <b>{symbol}</b> ditambahkan.", parse_mode="HTML")
+        elif len(wl) >= 10:
+            await update.message.reply_text("Watchlist penuh (maks 10).")
+        else:
+            self.storage.add_to_watchlist(user_id, symbol)
+            await update.message.reply_text(f"✅ <b>{symbol}</b> ditambahkan.", parse_mode="HTML")
 
     async def cmd_unwatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
@@ -531,22 +416,22 @@ class IDXDayTraderBot:
         if not symbols:
             await update.message.reply_text("📋 Watchlist kosong.\nTambahkan: /watch BBCA")
             return
-        await update.message.reply_text(f"🔍 Menganalisa {len(symbols)} saham di watchlist...")
+        await update.message.reply_text(f"🔍 Menganalisa {len(symbols)} saham...")
         ihsg_chg = await self._get_ihsg_async()
-        results  = await self._scan_async(symbols, threshold=0, strict_filter=False, ihsg_chg=ihsg_chg)
+        results  = await self._scan_async(symbols, 0, False, ihsg_chg)
         if not results:
-            await update.message.reply_text("Gagal mengambil data. Coba lagi sesaat.")
+            await update.message.reply_text("Gagal mengambil data.")
             return
         msg = "📋 <b>Watchlist Kamu</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n"
         for s in results:
             rek  = "💪 BUY" if s["score"] >= 75 else "👀 WATCH" if s["score"] >= 50 else "🚫 AVOID"
             vok  = "✅" if s["price"] > s.get("vwap", 0) else "⚠️"
             mtf  = "✅" if s.get("mtf_trend") == "daily_uptrend" else "⚠️" if s.get("mtf_trend") == "daily_downtrend" else "➡️"
-            rs   = "💪" if s.get("rs_stronger") else ""
             sign = "+" if s["change_pct"] > 0 else ""
             msg += (
-                f"<b>{s['symbol']}</b> {rs} — Rp {s['price']:,}  ({sign}{s['change_pct']}%)\n"
-                f"RSI:{s['rsi']} ADX:{s.get('adx','—')} MTF:{mtf} VWAP:{vok} OBV:{'✅' if s.get('obv_ok') else '⚠️'}\n"
+                f"<b>{s['symbol']}</b> {'💪' if s.get('rs_stronger') else ''} — "
+                f"Rp {s['price']:,} ({sign}{s['change_pct']}%)\n"
+                f"RSI:{s['rsi']} ADX:{s.get('adx','—')} MTF:{mtf} VWAP:{vok}\n"
                 f"Entry:Rp {s.get('best_entry',s['price']):,} | Skor:{s['score']} → {rek}\n\n"
             )
         await update.message.reply_text(msg, parse_mode="HTML")
@@ -555,24 +440,24 @@ class IDXDayTraderBot:
         """Handle non-command messages using Gemini AI — Pro Trader Edition."""
         if not self.ai_active:
             return
- 
+
         user_text = update.message.text
         if not user_text:
             return
- 
+
         logger.info(f"AI Chat from {update.effective_user.first_name}: {user_text[:60]}...")
- 
+
         try:
             # ── Kumpulkan konteks market real-time ─────────────────────
             market_context = ""
             text_lower     = user_text.lower()
- 
+
             # Selalu fetch IHSG untuk context
             ihsg_chg = await self._get_ihsg_async()
             if ihsg_chg is not None:
                 arah  = "menguat" if ihsg_chg > 0 else "melemah"
                 market_context += f"- IHSG hari ini {arah} {ihsg_chg:+.2f}%\n"
- 
+
             # Fetch makro jika relevan
             if any(k in text_lower for k in [
                 "makro", "macro", "global", "dolar", "dxy", "fed", "oil", "minyak",
@@ -587,7 +472,7 @@ class IDXDayTraderBot:
                         market_context += "- ⚠️ KONDISI RISK-OFF AKTIF\n"
                 except Exception:
                     pass
- 
+
             # Fetch analisa saham jika ada kode saham disebutkan
             import re
             saham_mentioned = re.findall(r'\b([A-Z]{4})\b', user_text.upper())
@@ -615,17 +500,17 @@ class IDXDayTraderBot:
                             )
                     except Exception:
                         pass
- 
+
             # ── System Prompt — Pro Trader IDX ─────────────────────────
             system_prompt = """Kamu adalah DUKUN KEUANGAN — AI trading assistant untuk pasar saham IDX (BEI) yang dibangun khusus untuk day trader profesional Indonesia.
- 
+
                 IDENTITAS & KARAKTER:
                 - Seorang veteran trader IDX dengan pengalaman 15+ tahun
                 - Menguasai analisa teknikal (Elliot Wave, Wyckoff Method, ICT Concepts, Smart Money Concept)
                 - Bicara seperti mentor trading senior: tegas, lugas, jujur, terkadang blak-blakan tapi selalu berbasis data
                 - Pakai bahasa Indonesia yang natural + istilah trading IDX yang umum
                 - Tidak menggurui, tapi mengedukasi dengan contoh nyata
-                
+
                 KEAHLIAN UTAMA:
                 1. ANALISA TEKNIKAL MENDALAM
                 - Support/Resistance multi-timeframe (1m, 5m, 15m, 1H, Daily)
@@ -633,7 +518,7 @@ class IDXDayTraderBot:
                 - Pattern: Hammer, Engulfing, Doji, Head & Shoulders, Cup & Handle, Bull/Bear Flag
                 - Smart Money Concept: liquidity sweep, order block, FVG (Fair Value Gap)
                 - Volume Analysis: volume spike, accumulation/distribution, climax volume
-                
+
                 2. TRADE MANAGEMENT PROFESIONAL
                 - Entry: market order vs limit order, best entry zone (pullback ke VWAP/Support/EMA)
                 - TP bertingkat: TP1 parsial (50-70%) di resistance terdekat, TP2 runner di Fibonacci 1.618
@@ -641,45 +526,45 @@ class IDXDayTraderBot:
                 - Trailing stop setelah TP1 tercapai: geser SL ke breakeven
                 - Position sizing: risk 1-2% per trade, max 3 posisi bersamaan
                 - RRR minimum 1:1.3 sebelum entry
-                
+
                 3. PSIKOLOGI TRADING
                 - FOMO awareness: jangan kejar saham yang sudah lari >3% dari open
                 - Revenge trading: istirahat setelah 2x loss berturut-turut
                 - Overtrading: max 3 trade per hari untuk day trading
                 - Cut loss tanpa rasa sakit: SL adalah biaya berbisnis, bukan kekalahan
-                
+
                 4. KONTEKS IDX SPESIFIK
                 - Jam aman entry: 09:15-11:45 dan 13:45-14:55 WIB
                 - Hindari: pre-opening (sebelum 09:15), jeda siang, pre-closing (setelah 14:55)
                 - LQ45 focus: pilih saham dengan volume >5jt lembar/hari untuk likuiditas
                 - Biaya trading IDX: buy 0.15% + sell 0.25% + estimasi slippage 0.05%
                 - Auto rejection IDX: +25%/-25% dari harga acuan (ARA/ARB)
-                
+
                 5. RISK-OFF AWARENESS
                 - Saat IHSG turun >1.5%: kurangi ukuran posisi 50%, prioritas cut loss
                 - Saat VIX tinggi (>25): hindari saham volatile, fokus defensif (BBCA, TLKM, UNTR)
                 - Saat DXY naik tajam: tekanan pada Rupiah, hati-hati sektor konsumer & perbankan
-                
+
                 CARA MENJAWAB:
                 - Langsung ke inti, tidak bertele-tele
                 - Selalu sertakan level harga spesifik saat bicara support/resistance
                 - Format jawaban: singkat tapi padat, gunakan emoji secukupnya
                 - Untuk analisa saham: selalu sebut entry zone, TP, SL, dan RRR
                 - Untuk edukasi: gunakan analogi yang mudah dipahami trader Indonesia
-                
+
                 BATASAN:
                 - Tidak memberikan rekomendasi beli/jual yang bersifat absolut
                 - Selalu akhiri dengan: "DYOR — keputusan ada di tanganmu."
                 - Tidak membahas topik di luar trading/investasi saham
                 - Tidak membahas saham gorengan tanpa disclaimer risiko tinggi"""
- 
+
             # ── Bangun full prompt ──────────────────────────────────────
             context_block = ""
             if market_context:
                 context_block += f"\n📊 DATA PASAR REAL-TIME:\n{market_context}"
             if saham_context:
                 context_block += f"\n📈 ANALISA TEKNIKAL BOT:{saham_context}"
- 
+
             full_prompt = (
                 f"{system_prompt}"
                 f"{context_block}"
@@ -687,13 +572,13 @@ class IDXDayTraderBot:
                 f"\nUser: {user_text}"
                 f"\n\nDukun Keuangan:"
             )
- 
+
             # ── Kirim ke Gemini ─────────────────────────────────────────
             await context.bot.send_chat_action(
                 chat_id=update.effective_chat.id,
                 action="typing"
             )
- 
+
             try:
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -703,25 +588,25 @@ class IDXDayTraderBot:
                     ),
                     timeout=65.0
                 )
- 
+
                 reply = response.text.strip()
- 
+
                 # Pastikan disclaimer selalu ada jika bicara saham
                 if saham_mentioned and "DYOR" not in reply:
                     reply += "\n\n_DYOR — keputusan ada di tanganmu._"
- 
+
                 # Telegram max 4096 chars — potong kalau terlalu panjang
                 if len(reply) > 4000:
                     reply = reply[:3950] + "\n\n_...(terpotong, tanya lebih spesifik)_"
- 
+
                 await update.message.reply_text(reply, parse_mode="Markdown")
- 
+
             except asyncio.TimeoutError:
                 logger.error("Gemini request timed out.")
                 await update.message.reply_text(
                     "⚠️ AI-nya lagi mikir keras, timeout. Coba tanya lagi dengan pertanyaan yang lebih spesifik."
                 )
- 
+
         except Exception as exc:
             logger.error(f"Gemini error: {exc}")
             await update.message.reply_text(
@@ -735,6 +620,7 @@ class IDXDayTraderBot:
         defaults = Defaults(tzinfo=self.tz)
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).defaults(defaults).build()
 
+        # Commands
         for cmd, fn in [
             ("start",     self.cmd_start),
             ("help",      self.cmd_start),
@@ -749,27 +635,34 @@ class IDXDayTraderBot:
             ("watch",     self.cmd_watch),
             ("unwatch",   self.cmd_unwatch),
             ("watchlist", self.cmd_watchlist),
+            ("reset",     self.cmd_reset),
+            ("alert",     self.cmd_alert),
+            ("alerts",    self.cmd_alerts),
+            ("delalert",  self.cmd_delalert),
         ]:
             app.add_handler(CommandHandler(cmd, fn))
 
-        # Generic message handler for AI Chat
+        # Message handlers
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
 
+        # Schedulers
         jq = app.job_queue
-        jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(0, 1, 2, 3, 4))
-        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(0, 1, 2, 3, 4))
+        jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(0,1,2,3,4))
+        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(0,1,2,3,4))
 
-        # Background TP/SL monitor
-        self.monitor = SignalMonitor(app, self.storage)
+        # Background tasks
+        self.monitor   = SignalMonitor(app, self.storage)
+        self.alert_mgr = PriceAlertManager(app)
 
         async def _on_startup(application):
-            asyncio.create_task(
-                self.monitor.run_loop(TELEGRAM_CHAT_ID, self._trade_date)
-            )
+            asyncio.create_task(self.monitor.run_loop(TELEGRAM_CHAT_ID, self._trade_date))
+            asyncio.create_task(self.alert_mgr.run_loop())
+            logger.info("✅ Monitor TP/SL + Price Alert aktif.")
 
         app.post_init = _on_startup
 
-        logger.info("🚀 Bot siap! 13 commands + scheduler + real-time monitor aktif.")
+        logger.info("🚀 Bot v5 siap! 17 commands + AI chat + chart vision + price alert.")
         app.run_polling()
 
 
