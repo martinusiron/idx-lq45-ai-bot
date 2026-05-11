@@ -552,70 +552,181 @@ class IDXDayTraderBot:
         await update.message.reply_text(msg, parse_mode="HTML")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle non-command messages using Gemini AI."""
+        """Handle non-command messages using Gemini AI — Pro Trader Edition."""
         if not self.ai_active:
-            # Jika AI tidak aktif, jangan respon chat biasa agar tidak spam
             return
-
+ 
         user_text = update.message.text
         if not user_text:
             return
-
-        # Hanya respon di private chat atau jika bot di-mention (jika di grup)
-        # Untuk kesederhanaan, kita respon semua text di chat yang terdaftar
-        
-        logger.info(f"AI Chat request from {update.effective_user.first_name}: {user_text[:50]}...")
-        
+ 
+        logger.info(f"AI Chat from {update.effective_user.first_name}: {user_text[:60]}...")
+ 
         try:
-            # Enhanced System Prompt
-            system_prompt = (
-                "Role & Personality:\n"
-                "Anda adalah IDX Day Trader Assistant (Enhanced), seorang asisten cerdas dan analis teknikal pro "
-                "untuk pasar saham Bursa Efek Indonesia (BEI). Kepribadian Anda adalah campuran antara trader senior "
-                "yang bijak, santai, namun sangat presisi. Gunakan bahasa Indonesia yang modern, sering gunakan "
-                "istilah trading yang umum (seperti support, resistance, breakout, cut loss), namun tetap profesional.\n\n"
-                "Core Tasks:\n"
-                "1. Analisa Teknikal: Membantu memetakan support/resistance, indikator (MA, RSI, MACD), & pola grafik.\n"
-                "2. Edukasi & Strategi: Menjelaskan konsep day trading, swing trading, risk management, & psikologi.\n"
-                "3. Navigasi Bot: Menjelaskan fitur bot ini (cek harga, alert, baca chart).\n"
-                "4. Sentimen Pasar: Rangkuman sentimen harian atau berita emiten BEI.\n\n"
-                "Operational Guidelines:\n"
-                "- Disclaimer (Wajib): Selalu sertakan bahwa ini bukan ajakan beli/jual. Gunakan frasa: 'Ingat, ini hanya opini untuk bahan pertimbangan, keputusan ada di tanganmu (DYOR - Do Your Own Research).'\n"
-                "- Manajemen Risiko: Selalu tekankan pentingnya Stop Loss.\n"
-                "- Saham Gorengan: Berikan peringatan ekstra risiko volatilitas untuk saham tidak likuid.\n"
-                "- Interaksi: Tetap di topik trading saham BEI.\n\n"
-                "Contoh Gaya Bahasa:\n"
-                "- 'Wah, $BBRI lagi ngetes resistance kuat di area 5500 nih. Kalau kuat breakout, potensinya lanjut, tapi jangan lupa jaga jempol di tombol sell kalau balik arah ya!'\n"
-                "- 'Saran saya, atur money management-mu dulu sebelum entry. Lebih baik ketinggalan kereta daripada nyangkut di pucuk.'\n"
+            # ── Kumpulkan konteks market real-time ─────────────────────
+            market_context = ""
+            text_lower     = user_text.lower()
+ 
+            # Selalu fetch IHSG untuk context
+            ihsg_chg = await self._get_ihsg_async()
+            if ihsg_chg is not None:
+                arah  = "menguat" if ihsg_chg > 0 else "melemah"
+                market_context += f"- IHSG hari ini {arah} {ihsg_chg:+.2f}%\n"
+ 
+            # Fetch makro jika relevan
+            if any(k in text_lower for k in [
+                "makro", "macro", "global", "dolar", "dxy", "fed", "oil", "minyak",
+                "ihsg", "market", "bursa", "sentimen", "vix", "nikel", "batubara", "emas"
+            ]):
+                try:
+                    macro = await self._get_macro_async()
+                    data  = macro.get("data", {})
+                    for ticker, d in data.items():
+                        market_context += f"- {d['label']}: {d['value']:,} ({d['change_pct']:+.2f}%)\n"
+                    if macro.get("is_risk_off"):
+                        market_context += "- ⚠️ KONDISI RISK-OFF AKTIF\n"
+                except Exception:
+                    pass
+ 
+            # Fetch analisa saham jika ada kode saham disebutkan
+            import re
+            saham_mentioned = re.findall(r'\b([A-Z]{4})\b', user_text.upper())
+            saham_context   = ""
+            lq45_set        = set(LQ45_SYMBOLS)
+            for kode in saham_mentioned[:2]:   # max 2 saham per query
+                if kode in lq45_set:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        res  = await loop.run_in_executor(
+                            None, self._analyze_one, kode, 0, False, ihsg_chg
+                        )
+                        if res:
+                            saham_context += (
+                                f"\nData teknikal ${kode} saat ini:\n"
+                                f"- Harga: Rp {res['price']:,}\n"
+                                f"- Best Entry: Rp {res['best_entry']:,} ({res['entry_type']})\n"
+                                f"- TP1: Rp {res['tp1']:,} | TP2: Rp {res['tp2']:,}\n"
+                                f"- SL: Rp {res['sl']:,}\n"
+                                f"- RSI: {res['rsi']} | ADX: {res['adx']} | Skor: {res['score']}/100\n"
+                                f"- Trend 15m: {res['market_cond']} | MTF Daily: {res['mtf_trend']}\n"
+                                f"- VWAP: {'Above ✅' if res['price'] > res['vwap'] else 'Below ⚠️'} | "
+                                f"OBV: {'Konfirmasi ✅' if res['obv_ok'] else 'Divergence ⚠️'}\n"
+                                f"- Sinyal: {res['alasan']}\n"
+                            )
+                    except Exception:
+                        pass
+ 
+            # ── System Prompt — Pro Trader IDX ─────────────────────────
+            system_prompt = """Kamu adalah DUKUN KEUANGAN — AI trading assistant untuk pasar saham IDX (BEI) yang dibangun khusus untuk day trader profesional Indonesia.
+ 
+                IDENTITAS & KARAKTER:
+                - Seorang veteran trader IDX dengan pengalaman 15+ tahun
+                - Menguasai analisa teknikal (Elliot Wave, Wyckoff Method, ICT Concepts, Smart Money Concept)
+                - Bicara seperti mentor trading senior: tegas, lugas, jujur, terkadang blak-blakan tapi selalu berbasis data
+                - Pakai bahasa Indonesia yang natural + istilah trading IDX yang umum
+                - Tidak menggurui, tapi mengedukasi dengan contoh nyata
+                
+                KEAHLIAN UTAMA:
+                1. ANALISA TEKNIKAL MENDALAM
+                - Support/Resistance multi-timeframe (1m, 5m, 15m, 1H, Daily)
+                - Indikator: EMA, VWAP, RSI, Stochastic, MACD, ADX, Bollinger Bands, OBV
+                - Pattern: Hammer, Engulfing, Doji, Head & Shoulders, Cup & Handle, Bull/Bear Flag
+                - Smart Money Concept: liquidity sweep, order block, FVG (Fair Value Gap)
+                - Volume Analysis: volume spike, accumulation/distribution, climax volume
+                
+                2. TRADE MANAGEMENT PROFESIONAL
+                - Entry: market order vs limit order, best entry zone (pullback ke VWAP/Support/EMA)
+                - TP bertingkat: TP1 parsial (50-70%) di resistance terdekat, TP2 runner di Fibonacci 1.618
+                - SL wajib: selalu di bawah swing low terdekat, bukan flat persentase
+                - Trailing stop setelah TP1 tercapai: geser SL ke breakeven
+                - Position sizing: risk 1-2% per trade, max 3 posisi bersamaan
+                - RRR minimum 1:1.3 sebelum entry
+                
+                3. PSIKOLOGI TRADING
+                - FOMO awareness: jangan kejar saham yang sudah lari >3% dari open
+                - Revenge trading: istirahat setelah 2x loss berturut-turut
+                - Overtrading: max 3 trade per hari untuk day trading
+                - Cut loss tanpa rasa sakit: SL adalah biaya berbisnis, bukan kekalahan
+                
+                4. KONTEKS IDX SPESIFIK
+                - Jam aman entry: 09:15-11:45 dan 13:45-14:55 WIB
+                - Hindari: pre-opening (sebelum 09:15), jeda siang, pre-closing (setelah 14:55)
+                - LQ45 focus: pilih saham dengan volume >5jt lembar/hari untuk likuiditas
+                - Biaya trading IDX: buy 0.15% + sell 0.25% + estimasi slippage 0.05%
+                - Auto rejection IDX: +25%/-25% dari harga acuan (ARA/ARB)
+                
+                5. RISK-OFF AWARENESS
+                - Saat IHSG turun >1.5%: kurangi ukuran posisi 50%, prioritas cut loss
+                - Saat VIX tinggi (>25): hindari saham volatile, fokus defensif (BBCA, TLKM, UNTR)
+                - Saat DXY naik tajam: tekanan pada Rupiah, hati-hati sektor konsumer & perbankan
+                
+                CARA MENJAWAB:
+                - Langsung ke inti, tidak bertele-tele
+                - Selalu sertakan level harga spesifik saat bicara support/resistance
+                - Format jawaban: singkat tapi padat, gunakan emoji secukupnya
+                - Untuk analisa saham: selalu sebut entry zone, TP, SL, dan RRR
+                - Untuk edukasi: gunakan analogi yang mudah dipahami trader Indonesia
+                
+                BATASAN:
+                - Tidak memberikan rekomendasi beli/jual yang bersifat absolut
+                - Selalu akhiri dengan: "DYOR — keputusan ada di tanganmu."
+                - Tidak membahas topik di luar trading/investasi saham
+                - Tidak membahas saham gorengan tanpa disclaimer risiko tinggi"""
+ 
+            # ── Bangun full prompt ──────────────────────────────────────
+            context_block = ""
+            if market_context:
+                context_block += f"\n📊 DATA PASAR REAL-TIME:\n{market_context}"
+            if saham_context:
+                context_block += f"\n📈 ANALISA TEKNIKAL BOT:{saham_context}"
+ 
+            full_prompt = (
+                f"{system_prompt}"
+                f"{context_block}"
+                f"\n\n{'─'*40}"
+                f"\nUser: {user_text}"
+                f"\n\nDukun Keuangan:"
             )
-
-            # Show typing status in Telegram
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
-
-            # Build final prompt with context
-            full_prompt = f"{system_prompt}\n\nUser bertanya: {user_text}"
-            
-            # Tambahkan info market jika perlu
-            if any(k in user_text.lower() for k in ["market", "ihsg", "bursa"]):
-                ihsg = await self._get_ihsg_async()
-                if ihsg:
-                    full_prompt += f"\n\nInfo tambahan: IHSG saat ini sedang {ihsg}%."
-
-            # Call Gemini with timeout
+ 
+            # ── Kirim ke Gemini ─────────────────────────────────────────
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action="typing"
+            )
+ 
             try:
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(self.model.generate_content, full_prompt, request_options={"timeout": 60}),
+                    asyncio.to_thread(
+                        self.model.generate_content,
+                        full_prompt,
+                        request_options={"timeout": 60}
+                    ),
                     timeout=65.0
                 )
-                await update.message.reply_text(response.text)
+ 
+                reply = response.text.strip()
+ 
+                # Pastikan disclaimer selalu ada jika bicara saham
+                if saham_mentioned and "DYOR" not in reply:
+                    reply += "\n\n_DYOR — keputusan ada di tanganmu._"
+ 
+                # Telegram max 4096 chars — potong kalau terlalu panjang
+                if len(reply) > 4000:
+                    reply = reply[:3950] + "\n\n_...(terpotong, tanya lebih spesifik)_"
+ 
+                await update.message.reply_text(reply, parse_mode="Markdown")
+ 
             except asyncio.TimeoutError:
                 logger.error("Gemini request timed out.")
                 await update.message.reply_text(
-                    "⚠️ Maaf, respon AI terlalu lama. Silakan coba tanya lagi sesaat lagi."
+                    "⚠️ AI-nya lagi mikir keras, timeout. Coba tanya lagi dengan pertanyaan yang lebih spesifik."
                 )
+ 
         except Exception as exc:
             logger.error(f"Gemini error: {exc}")
-            # Jangan kirim error ke user agar tidak mengganggu, cukup log saja
+            await update.message.reply_text(
+                "⚠️ Ada gangguan teknis pada AI. Coba lagi sesaat."
+            )
 
     # ------------------------------------------------------------------ #
     #  MAIN RUNNER
