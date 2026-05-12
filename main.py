@@ -436,6 +436,86 @@ class IDXDayTraderBot:
             )
         await update.message.reply_text(msg, parse_mode="HTML")
 
+    # ── Price Alert ─────────────────────────────────────────────────────
+    async def cmd_alert(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if len(context.args) < 2:
+            await update.message.reply_text("⚠️ Format: /alert BBCA 9200 [atas/bawah]")
+            return
+        
+        symbol = context.args[0].upper().replace(".JK", "")
+        try:
+            target = float(context.args[1])
+        except ValueError:
+            await update.message.reply_text("⚠️ Harga harus angka.")
+            return
+            
+        direction = "atas"
+        if len(context.args) >= 3:
+            d_arg = context.args[2].lower()
+            if d_arg in ["bawah", "down", "below"]:
+                direction = "bawah"
+        
+        user_id = str(update.effective_user.id)
+        chat_id = str(update.effective_chat.id)
+        
+        success = self.alert_mgr.add_alert(user_id, chat_id, symbol, target, direction)
+        if success:
+            await update.message.reply_text(
+                f"🔔 Alert dipasang: <b>{symbol}</b> saat harga {'≥' if direction == 'atas' else '≤'} Rp {int(target):,}",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text("⚠️ Gagal: Maksimum 5 alert aktif per user.")
+
+    async def cmd_alerts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = str(update.effective_user.id)
+        alerts = self.alert_mgr.get_alerts(user_id)
+        if not alerts:
+            await update.message.reply_text("📭 Kamu tidak memiliki alert aktif.")
+            return
+            
+        msg = "🔔 <b>Alert Aktif Kamu</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        for a in alerts:
+            msg += (
+                f"• <b>{a['symbol']}</b>: {'≥' if a['direction'] == 'atas' else '≤'} "
+                f"Rp {int(a['target']):,}\n"
+            )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+    async def cmd_delalert(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not context.args:
+            await update.message.reply_text("⚠️ Format: /delalert BBCA")
+            return
+        
+        symbol = context.args[0].upper().replace(".JK", "")
+        user_id = str(update.effective_user.id)
+        count = self.alert_mgr.remove_alert(user_id, symbol)
+        
+        if count > 0:
+            await update.message.reply_text(f"🗑️ {count} alert <b>{symbol}</b> dihapus.", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"⚠️ Tidak ada alert untuk {symbol}.")
+
+    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming chart screenshots."""
+        if not self.ai_active:
+            await update.message.reply_text("⚠️ AI sedang tidak aktif.")
+            return
+
+        await update.message.reply_text("🔬 Menganalisa chart, tunggu sebentar...")
+        try:
+            photo_file = await update.message.photo[-1].get_file()
+            img_bytes  = await photo_file.download_as_bytearray()
+            
+            # Additional context from caption if any
+            caption = update.message.caption or ""
+            
+            analysis = await analyze_chart_image(self.model, bytes(img_bytes), caption)
+            await update.message.reply_text(analysis, parse_mode="Markdown")
+        except Exception as exc:
+            logger.error(f"handle_photo error: {exc}")
+            await update.message.reply_text("⚠️ Gagal menganalisa gambar. Pastikan formatnya benar.")
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle non-command messages using Gemini AI — Pro Trader Edition."""
         if not self.ai_active:
