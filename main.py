@@ -728,8 +728,9 @@ class IDXDayTraderBot:
 
         # Schedulers
         jq = app.job_queue
-        jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(0,1,2,3,4))
-        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(0,1,2,3,4))
+        # Schedulers — PTB v20+: 0=Minggu, 1=Senin, 2=Selasa, 3=Rabu, 4=Kamis, 5=Jumat, 6=Sabtu
+        jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(1,2,3,4,5))
+        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(1,2,3,4,5))
 
         # Background tasks
         self.monitor   = SignalMonitor(app, self.storage)
