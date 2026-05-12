@@ -8,7 +8,8 @@ import asyncio
 import logging
 from io import BytesIO
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -75,11 +76,25 @@ async def analyze_chart_image(
             prompt += f"\n\nKonteks tambahan dari user: {additional_context}"
 
         # Gemini vision: kirim image + text
+        import io
+        img_bytes_io = io.BytesIO()
+        img.save(img_bytes_io, format="JPEG")
+        img_bytes_io.seek(0)
+        
         response = await asyncio.wait_for(
             asyncio.to_thread(
-                model.generate_content,
-                [prompt, img],
-                request_options={"timeout": 90},
+                model.models.generate_content,
+                model="gemini-2.5-flash-lite",
+                contents=[
+                    genai_types.Part.from_bytes(
+                        data=img_bytes_io.read(),
+                        mime_type="image/jpeg"
+                    ),
+                    prompt,
+                ],
+                config=genai_types.GenerateContentConfig(
+                    http_options=genai_types.HttpOptions(timeout=90000)
+                )
             ),
             timeout=95.0,
         )

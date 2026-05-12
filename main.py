@@ -10,7 +10,8 @@ import logging
 import re
 from datetime import time
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from telegram import Update, constants
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
@@ -74,8 +75,7 @@ class IDXDayTraderBot:
 
         if GEMINI_API_KEY:
             try:
-                genai.configure(api_key=GEMINI_API_KEY)
-                self.model     = genai.GenerativeModel("gemini-2.5-flash-lite")
+                self.model     = genai.Client(api_key=GEMINI_API_KEY)
                 self.ai_active = True
                 logger.info("✅ Gemini AI aktif (gemini-2.5-flash-lite)")
             except Exception as exc:
@@ -662,9 +662,12 @@ class IDXDayTraderBot:
             try:
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
-                        self.model.generate_content,
-                        full_prompt,
-                        request_options={"timeout": 60}
+                        self.model.models.generate_content,
+                        model="gemini-2.5-flash-lite",
+                        contents=full_prompt,
+                        config=genai_types.GenerateContentConfig(
+                            http_options=genai_types.HttpOptions(timeout=60000)
+                        )
                     ),
                     timeout=65.0
                 )
@@ -693,6 +696,47 @@ class IDXDayTraderBot:
                 "⚠️ Ada gangguan teknis pada AI. Coba lagi sesaat."
             )
 
+    async def cmd_datasource(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Tampilkan sumber data aktif (GoAPI vs yfinance)."""
+        from config import GOAPI_API_KEY
+        import requests
+        
+        lines = ["📡 <b>Status Sumber Data</b>\n━━━━━━━━━━━━━━━━━━━━━\n"]
+        
+        # GoAPI status
+        if GOAPI_API_KEY:
+            lines.append("🔑 GoAPI Key: <b>Terpasang</b>")
+            # Test live connection
+            try:
+                resp = requests.get(
+                    "https://api.goapi.io/stock/idx/prices",
+                    params={"symbols": "BBCA", "api_key": GOAPI_API_KEY},
+                    headers={"Authorization": GOAPI_API_KEY},
+                    timeout=8
+                )
+                if resp.status_code == 200 and resp.json().get("status") == "success":
+                    results = resp.json()["data"]["results"]
+                    price = results[0]["close"] if results else "?"
+                    lines.append(f"✅ GoAPI <b>AKTIF</b> — Harga BBCA: Rp {int(price):,}")
+                    lines.append("")
+                    lines.append("📊 <b>Pembagian Tugas:</b>")
+                    lines.append("• Harga Live (TP/SL Monitor) → <b>GoAPI</b>")
+                    lines.append("• Price Alert → <b>GoAPI</b>")
+                    lines.append("• Data Harian (Daily) → <b>GoAPI</b>")
+                    lines.append("• Data Intraday 15m (Analisa) → <b>yfinance</b>")
+                    lines.append("  <i>(GoAPI tidak support intraday)</i>")
+                else:
+                    lines.append(f"⚠️ GoAPI Error: {resp.status_code}")
+                    lines.append("• Semua data → <b>yfinance</b> (fallback aktif)")
+            except Exception as e:
+                lines.append(f"❌ GoAPI tidak bisa dihubungi: <i>{e}</i>")
+                lines.append("• Semua data → <b>yfinance</b> (fallback aktif)")
+        else:
+            lines.append("⚠️ GoAPI Key: <b>Tidak terpasang</b>")
+            lines.append("• Semua data → <b>yfinance</b> (delay ~15 menit)")
+        
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
     # ------------------------------------------------------------------ #
     #  MAIN RUNNER
     # ------------------------------------------------------------------ #
@@ -718,7 +762,8 @@ class IDXDayTraderBot:
             ("reset",     self.cmd_reset),
             ("alert",     self.cmd_alert),
             ("alerts",    self.cmd_alerts),
-            ("delalert",  self.cmd_delalert),
+            ("delalert",    self.cmd_delalert),
+            ("datasource",  self.cmd_datasource),
         ]:
             app.add_handler(CommandHandler(cmd, fn))
 
