@@ -12,6 +12,7 @@ load_dotenv()
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
+GOAPI_API_KEY    = os.getenv("GOAPI_API_KEY")
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "https://bdlmltxzvlxbxzyyvpuw.supabase.co")

@@ -12,8 +12,9 @@ import numpy as np
 import pandas as pd
 import ta
 import yfinance as yf
-
-from config import DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS
+import requests
+from datetime import datetime, timedelta
+from config import DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS, GOAPI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +61,18 @@ class StockAnalyzer:
         period: str = DATA_PERIOD,
         interval: str = DATA_INTERVAL,
     ) -> pd.DataFrame | None:
-        """Fetch OHLCV 15m. Pakai '59d' bukan '2mo' — Yahoo batas 60 hari."""
+        """Fetch OHLCV. Prioritas GoAPI jika ada API Key, fallback ke Yahoo."""
+        if GOAPI_API_KEY:
+            df = self._fetch_goapi(symbol, interval)
+            if df is not None and not df.empty:
+                return df
+
         try:
             ticker = f"{symbol}.JK" if not symbol.endswith(".JK") else symbol
             df = yf.download(ticker, period=period, interval=interval,
                              progress=False, auto_adjust=True)
 
-            logger.info(f"[{symbol}] df.empty={df.empty}, len={len(df)}")
+            logger.info(f"[{symbol}] yfinance df.empty={df.empty}, len={len(df)}")
             if df.empty:
                 return None
 
@@ -79,6 +85,67 @@ class StockAnalyzer:
             return df
         except Exception as exc:
             logger.error(f"[{symbol}] fetch_data error: {exc}")
+            return None
+
+    def _fetch_goapi(self, symbol: str, interval: str) -> pd.DataFrame | None:
+        """Fetch historical daily candles dari GoAPI.io.
+        
+        Catatan: GoAPI hanya mendukung data historis HARIAN (1D).
+        Untuk intraday (15m, 1h), fallback ke yfinance.
+        """
+        # GoAPI tidak support intraday — skip dan biarkan yfinance handle
+        if interval not in ("1d", "1D"):
+            logger.info(f"[{symbol}] GoAPI tidak support {interval}, skip ke yfinance")
+            return None
+
+        try:
+            to_date   = datetime.now()
+            from_date = to_date - timedelta(days=365)  # Maks 1 tahun data
+
+            url    = f"https://api.goapi.io/stock/idx/{symbol.upper().replace('.JK', '')}/historical"
+            params = {
+                "api_key": GOAPI_API_KEY,
+                "from":    from_date.strftime("%Y-%m-%d"),
+                "to":      to_date.strftime("%Y-%m-%d"),
+            }
+            headers = {"Authorization": GOAPI_API_KEY, "accept": "application/json"}
+
+            logger.info(f"[{symbol}] Fetching GoAPI daily from {params['from']} to {params['to']}")
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+
+            if resp.status_code != 200:
+                logger.error(f"[{symbol}] GoAPI Error {resp.status_code}: {resp.text[:200]}")
+                return None
+
+            json_data = resp.json()
+            if json_data.get("status") != "success":
+                logger.warning(f"[{symbol}] GoAPI status failed: {json_data.get('message')}")
+                return None
+
+            results = json_data.get("data", {}).get("results", [])
+            if not results:
+                logger.warning(f"[{symbol}] GoAPI no results")
+                return None
+
+            df = pd.DataFrame(results)
+            df.columns = [c.lower() for c in df.columns]
+
+            # Timestamp dari field 'date'
+            df["timestamp"] = pd.to_datetime(df["date"])
+            df.set_index("timestamp", inplace=True)
+            df = df.sort_index()
+
+            # Pastikan kolom numerik
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = df.dropna(subset=["close"])
+            logger.info(f"[{symbol}] GoAPI success: {len(df)} daily rows")
+            return df
+
+        except Exception as exc:
+            logger.error(f"[{symbol}] _fetch_goapi exception: {exc}")
             return None
 
     def fetch_daily(self, symbol: str) -> pd.DataFrame | None:

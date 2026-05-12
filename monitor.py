@@ -9,8 +9,11 @@ import logging
 from datetime import datetime
 
 import pytz
+import pandas as pd
 import yfinance as yf
+import requests
 
+from config import GOAPI_API_KEY
 from market_calendar import is_trading_day, is_safe_trading_time
 
 logger = logging.getLogger(__name__)
@@ -26,18 +29,42 @@ class SignalMonitor:
         self.running = False
 
     def _fetch_price(self, symbol: str) -> float | None:
+        """Fetch harga terakhir. Prioritas GoAPI."""
+        if GOAPI_API_KEY:
+            try:
+                url = "https://api.goapi.io/stock/idx/prices"
+                params = {
+                    "symbols": symbol.upper().replace(".JK", ""),
+                    "api_key": GOAPI_API_KEY
+                }
+                headers = {"Authorization": GOAPI_API_KEY}
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("status") == "success":
+                        # Format: {"status": "success", "data": [{"symbol": "BBCA", "last": 10000, ...}]}
+                        results = data.get("data", {}).get("results", [])
+                        for res in results:
+                            sym_key = res.get("symbol", "")
+                            if sym_key == params["symbols"]:
+                                # GoAPI prices response field: 'close' bukan 'last'
+                                return float(res.get("close") or res.get("last") or 0)
+            except Exception as e:
+                logger.warning(f"[monitor] GoAPI fetch error: {e}")
+
+        # Fallback ke yfinance
         try:
-            df = yf.download(f"{symbol}.JK", period="1d", interval="1m",
+            ticker = f"{symbol}.JK" if not symbol.endswith(".JK") else symbol
+            df = yf.download(ticker, period="1d", interval="1m",
                              progress=False, auto_adjust=True)
-            if df.empty:
-                return None
-            if hasattr(df.columns, "get_level_values"):
-                df.columns = df.columns.get_level_values(0)
-            df.columns = [c.lower() for c in df.columns]
-            return float(df["close"].iloc[-1])
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df.columns = [c.lower() for c in df.columns]
+                return float(df["close"].iloc[-1])
         except Exception as exc:
-            logger.warning(f"[monitor] fetch {symbol}: {exc}")
-            return None
+            logger.warning(f"[monitor] yf fetch error: {exc}")
+        return None
 
     async def _alert(self, chat_id: str, msg: str) -> None:
         try:
