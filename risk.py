@@ -144,9 +144,9 @@ class RiskEngine:
 
             if partial_taken:
                 if hit_stop and hit_tp2:
-                    status = "BREAKEVEN"
+                    status = "TP1_SL_HIT"
                     exit_price = stop_price
-                    exit_reason = "Ambigu candle setelah TP1: asumsi konservatif breakeven kena lebih dulu."
+                    exit_reason = "Ambigu candle setelah TP1: asumsi konservatif breakeven (SL) kena lebih dulu."
                     if remaining_qty > 0:
                         realized_amount += self._net_pnl(fill_price, exit_price, remaining_qty)
                         realized_qty += remaining_qty
@@ -154,9 +154,9 @@ class RiskEngine:
                     break
 
                 if hit_stop:
-                    status = "BREAKEVEN"
+                    status = "TP1_SL_HIT"
                     exit_price = stop_price
-                    exit_reason = "Sisa posisi keluar di breakeven setelah TP1."
+                    exit_reason = "Sisa posisi keluar di breakeven (SL) setelah TP1."
                     if remaining_qty > 0:
                         realized_amount += self._net_pnl(fill_price, exit_price, remaining_qty)
                         realized_qty += remaining_qty
@@ -176,7 +176,7 @@ class RiskEngine:
                 continue
 
             if hit_stop and (hit_tp1 or hit_tp2):
-                status = "STOPPED"
+                status = "SL_HIT"
                 exit_price = stop_price
                 exit_reason = "Ambigu candle: asumsi konservatif stop kena lebih dulu."
                 realized_amount += self._net_pnl(fill_price, exit_price, qty)
@@ -185,7 +185,7 @@ class RiskEngine:
                 break
 
             if hit_stop:
-                status = "STOPPED"
+                status = "SL_HIT"
                 exit_price = stop_price
                 exit_reason = "Stop loss tersentuh."
                 realized_amount += self._net_pnl(fill_price, exit_price, qty)
@@ -218,8 +218,8 @@ class RiskEngine:
             unresolved_qty = qty - realized_qty
             if finalize:
                 exit_price = last_close
-                final_status = "CLOSED_EOD" if partial_taken else "OPEN_EOD"
-                exit_reason = "Posisi ditutup di harga evaluasi terakhir."
+                final_status = "TP1_EXIT_EOD" if partial_taken else "EXIT_EOD"
+                exit_reason = "Posisi ditutup di harga evaluasi terakhir (akhir sesi)."
                 realized_amount += self._net_pnl(fill_price, last_close, unresolved_qty)
                 realized_qty += unresolved_qty
                 status = final_status

@@ -112,10 +112,18 @@ class TelegramFormatter:
 
             if "TP2" in status:
                 emoji, label = "🚀", "TP2 HIT"
+            elif "TP1" in status and "SL" in status:
+                emoji, label = "🟡", "TP1 + BE"
+            elif "TP1" in status and "EXIT" in status:
+                emoji, label = "✅", "TP1 + EOD"
             elif "TP1" in status:
                 emoji, label = "✅", "TP1 HIT"
             elif "SL" in status:
                 emoji, label = "🔴", "SL HIT"
+            elif "EXIT" in status:
+                emoji, label = "⚪", "EXIT EOD"
+            elif "UNFILLED" in status:
+                emoji, label = "⚪", "NO FILL"
             else:
                 emoji, label = "⏳", "HOLD"
 
