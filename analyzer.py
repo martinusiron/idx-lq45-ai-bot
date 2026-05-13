@@ -124,8 +124,8 @@ class StockAnalyzer:
                 timeout=15,
             )
 
-            if resp.status_code in (402, 429):
-                logger.warning("[bulk_prefilter] GoAPI quota habis, skip pre-filter")
+            if resp.status_code in (402, 429) or (500 <= resp.status_code < 600):
+                logger.warning(f"[bulk_prefilter] GoAPI error {resp.status_code}, beralih ke yf")
                 self._goapi_ok = False
                 return symbols
 
@@ -213,11 +213,10 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] Fetching GoAPI daily from {params['from']} to {params['to']}")
             resp = requests.get(url, params=params, headers=headers, timeout=15)
 
-            # ── Deteksi quota habis ─────────────────────────────────────
-            if resp.status_code in (402, 429):
+            # ── Deteksi quota habis atau server error ──────────────────────
+            if resp.status_code in (402, 429) or (500 <= resp.status_code < 600):
                 logger.warning(
-                    f"[GoAPI] Quota/rate limit! HTTP {resp.status_code}. "
-                    "Beralih ke yfinance untuk sesi ini."
+                    f"[GoAPI] Error {resp.status_code}! Beralih ke yfinance untuk sesi ini."
                 )
                 self._goapi_ok = False  # Circuit breaker aktif
                 return None
