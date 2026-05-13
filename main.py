@@ -497,24 +497,63 @@ class IDXDayTraderBot:
             await update.message.reply_text(f"⚠️ Tidak ada alert untuk {symbol}.")
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming chart screenshots."""
+        """Handle incoming chart screenshots dengan retry."""
         if not self.ai_active:
-            await update.message.reply_text("⚠️ AI sedang tidak aktif.")
+            try:
+                await update.message.reply_text("⚠️ AI sedang tidak aktif.")
+            except Exception:
+                pass
             return
 
-        await update.message.reply_text("🔬 Menganalisa chart, tunggu sebentar...")
+        # Kirim "typing" indicator dulu — tidak perlu koneksi baru
         try:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id, action="upload_photo"
+            )
+        except Exception:
+            pass  # Tidak kritis jika gagal
+
+        try:
+            # Reply "tunggu" — retry sekali jika timeout
+            for attempt in range(2):
+                try:
+                    await update.message.reply_text("🔬 Menganalisa chart, tunggu sebentar...")
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        import asyncio
+                        await asyncio.sleep(3)
+                    else:
+                        logger.warning(f"handle_photo reply timeout: {e}")
+
             photo_file = await update.message.photo[-1].get_file()
             img_bytes  = await photo_file.download_as_bytearray()
-            
-            # Additional context from caption if any
-            caption = update.message.caption or ""
-            
+            caption    = update.message.caption or ""
+
             analysis = await analyze_chart_image(self.model, bytes(img_bytes), caption)
-            await update.message.reply_text(analysis, parse_mode="Markdown")
+
+            # Potong jika terlalu panjang
+            if len(analysis) > 4000:
+                analysis = analysis[:3950] + "\n\n_...(terpotong)_"
+
+            for attempt in range(2):
+                try:
+                    await update.message.reply_text(analysis, parse_mode="Markdown")
+                    break
+                except Exception:
+                    if attempt == 0:
+                        import asyncio
+                        await asyncio.sleep(3)
+                        # Fallback: kirim tanpa Markdown
+                        await update.message.reply_text(analysis)
+                    break
+
         except Exception as exc:
             logger.error(f"handle_photo error: {exc}")
-            await update.message.reply_text("⚠️ Gagal menganalisa gambar. Pastikan formatnya benar.")
+            try:
+                await update.message.reply_text("⚠️ Gagal menganalisa gambar. Coba kirim ulang.")
+            except Exception:
+                pass
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle non-command messages using Gemini AI — Pro Trader Edition."""
@@ -770,6 +809,25 @@ class IDXDayTraderBot:
         # Message handlers
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
+
+        # Global error handler — mencegah unhandled exception spam di log
+        async def _global_error_handler(update_obj, ctx) -> None:
+            err = ctx.error
+            # Timeout Telegram — tidak perlu crash, abaikan saja
+            if "TimedOut" in type(err).__name__ or "NetworkError" in type(err).__name__:
+                logger.warning(f"[network] Telegram timeout/network error (abaikan): {err}")
+                return
+            logger.error(f"[global] Unhandled exception: {err}", exc_info=ctx.error)
+            # Coba balas user jika ada update
+            if update_obj and hasattr(update_obj, 'effective_message') and update_obj.effective_message:
+                try:
+                    await update_obj.effective_message.reply_text(
+                        "⚠️ Terjadi gangguan sementara. Coba lagi sesaat."
+                    )
+                except Exception:
+                    pass
+
+        app.add_error_handler(_global_error_handler)
 
         # Schedulers
         jq = app.job_queue
