@@ -495,3 +495,17 @@ class TradingStorage:
 
     def remove_from_watchlist(self, user_id: str, symbol: str) -> bool:
         return self.remove_watch_symbol(user_id, symbol)
+
+    def get_all_users_with_watchlist(self) -> list[str]:
+        """Ambil semua user_id unik yang memiliki setidaknya 1 saham di watchlist."""
+        if self.backend == "supabase":
+            rows = self._supabase_request(
+                "GET", "watchlists",
+                params={"select": "user_id"},
+            )
+            # Supabase REST tidak dukung DISTINCT di query params dengan mudah tanpa custom function,
+            # jadi kita lakuin di Python.
+            return list({r["user_id"] for r in rows})
+        
+        rows = self._fetchall("SELECT DISTINCT user_id FROM watchlists")
+        return [r["user_id"] for r in rows]

@@ -7,14 +7,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 _ENTRY_LABEL = {
-    "market":  "🟡 Market (agresif)",
-    "vwap":    "🔵 VWAP Pullback",
-    "support": "🟢 Dekat Support",
-    "bb_low":  "🟢 Lower BB",
+    "market":  "🟡 Closing Hari Ini (market)",
+    "vwap":    "🟢 Limit Esok Pagi (dekat support)",
+    "support": "🟢 Dekat Support (akumulasi)",
+    "bb_low":  "🟢 Lower BB (reversal zone)",
 }
 _MKT_EMOJI = {"trending_up": "📈", "sideways": "➡️", "trending_down": "📉"}
-_MTF_EMOJI = {"daily_uptrend": "✅", "daily_downtrend": "⚠️", "daily_neutral": "➡️", "unknown": "❓"}
+_MTF_EMOJI = {"weekly_uptrend": "✅", "weekly_downtrend": "⚠️", "weekly_neutral": "➡️",
+             "daily_uptrend": "✅", "daily_downtrend": "⚠️", "daily_neutral": "➡️",
+             "unknown": "❓"}
 
 
 class TelegramFormatter:
@@ -51,7 +54,7 @@ class TelegramFormatter:
     @staticmethod
     def format_morning_signal(plans: list[dict]) -> str:
         top = sorted(plans, key=lambda x: x.get("score", 0), reverse=True)[:3]
-        msg = "🔔 <b>TRADE PLAN PAGI — IDX Day Trader</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg = "📊 <b>SWING SETUP — IDX Swing Trader</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         for i, s in enumerate(top, 1):
             entry  = s.get("best_entry", s.get("planned_entry", s.get("price", 0)))

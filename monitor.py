@@ -24,13 +24,14 @@ class SignalMonitor:
     """Background monitor untuk real-time TP/SL alert."""
 
     def __init__(self, app, storage) -> None:
-        self.app     = app
-        self.storage = storage
-        self.running = False
+        self.app        = app
+        self.storage    = storage
+        self.running    = False
+        self._goapi_ok  = True  # Circuit breaker: False jika quota habis
 
     def _fetch_price(self, symbol: str) -> float | None:
-        """Fetch harga terakhir. Prioritas GoAPI."""
-        if GOAPI_API_KEY:
+        """Fetch harga terakhir. Prioritas GoAPI, fallback ke yfinance."""
+        if GOAPI_API_KEY and self._goapi_ok:
             try:
                 url = "https://api.goapi.io/stock/idx/prices"
                 params = {
@@ -39,16 +40,23 @@ class SignalMonitor:
                 }
                 headers = {"Authorization": GOAPI_API_KEY}
                 resp = requests.get(url, params=params, headers=headers, timeout=10)
-                if resp.status_code == 200:
+
+                if resp.status_code in (402, 429):
+                    logger.warning("[monitor] GoAPI quota habis! Beralih ke yfinance.")
+                    self._goapi_ok = False
+                elif resp.status_code == 200:
                     data = resp.json()
-                    if data.get("status") == "success":
-                        # Format: {"status": "success", "data": [{"symbol": "BBCA", "last": 10000, ...}]}
+                    msg  = data.get("message", "").lower()
+                    if any(kw in msg for kw in ("quota", "limit", "exceeded", "upgrade")):
+                        logger.warning(f"[monitor] GoAPI quota dari body: '{msg}'")
+                        self._goapi_ok = False
+                    elif data.get("status") == "success":
                         results = data.get("data", {}).get("results", [])
                         for res in results:
-                            sym_key = res.get("symbol", "")
-                            if sym_key == params["symbols"]:
-                                # GoAPI prices response field: 'close' bukan 'last'
+                            if res.get("symbol", "") == params["symbols"]:
                                 return float(res.get("close") or res.get("last") or 0)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                logger.warning(f"[monitor] GoAPI tidak bisa dihubungi, fallback ke yfinance")
             except Exception as e:
                 logger.warning(f"[monitor] GoAPI fetch error: {e}")
 

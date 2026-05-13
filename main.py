@@ -22,12 +22,13 @@ from analyzer import StockAnalyzer
 from chart_vision import analyze_chart_image
 from config import (
     ACCOUNT_SIZE, BUY_FEE_PCT, DATABASE_URL, DAILY_MAX_LOSS_R, DB_PATH,
-    GEMINI_API_KEY, HIGH_PROB_THRESHOLD, LOT_SIZE, LQ45_SYMBOLS,
+    GEMINI_API_KEY, HIGH_PROB_THRESHOLD, WATCHLIST_ALERT_THRESHOLD, LOT_SIZE, LQ45_SYMBOLS,
     MAX_OPEN_POSITIONS, MIN_RRR, PARTIAL_EXIT_RATIO, RISK_OFF_MODE,
     RISK_OFF_SIZE_MULTIPLIER, RISK_PER_TRADE_PCT, SELL_FEE_PCT, SLIPPAGE_PCT,
     SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, TELEGRAM_CHAT_ID,
     TELEGRAM_TOKEN, TIMEZONE,
 )
+
 from conversation_store import ConversationStore
 from global_macro import GlobalMacroAnalyzer
 from market_calendar import is_trading_day, is_safe_trading_time
@@ -111,6 +112,12 @@ class IDXDayTraderBot:
     async def _scan_async(self, symbols: list[str], threshold: int,
                           strict_filter: bool = True,
                           ihsg_chg: float | None = None) -> list[dict]:
+        # Bulk pre-filter untuk menghemat API call
+        if strict_filter:
+            symbols = self.analyzer.bulk_prefilter(symbols)
+            if not symbols:
+                return []
+
         loop    = asyncio.get_event_loop()
         tasks   = [loop.run_in_executor(None, self._analyze_one, s, threshold, strict_filter, ihsg_chg) for s in symbols]
         results = await asyncio.gather(*tasks)
@@ -194,16 +201,40 @@ class IDXDayTraderBot:
             macro_task = self._get_macro_async()
             ihsg_task  = self._get_ihsg_async()
             macro, ihsg_chg = await asyncio.gather(macro_task, ihsg_task)
+
+            # 1. Scan LQ45 (General Signal)
             signals = await self._scan_async(LQ45_SYMBOLS, HIGH_PROB_THRESHOLD, True, ihsg_chg)
 
             async def send(t, **kw): await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=t, **kw)
             await send(self.formatter.format_macro_context(macro), parse_mode="HTML")
-            if not signals:
-                await send(f"📭 Tidak ada setup hari ini (Skor≥{HIGH_PROB_THRESHOLD} & RRR≥{MIN_RRR}).")
-                return
-            plans = self._build_trade_plans(signals, macro)
-            if plans:
-                await send(self.formatter.format_morning_signal(plans), parse_mode="HTML")
+
+            if signals:
+                plans = self._build_trade_plans(signals, macro)
+                if plans:
+                    await send(self.formatter.format_morning_signal(plans), parse_mode="HTML")
+            else:
+                await send(f"📭 Tidak ada setup LQ45 hari ini (Skor≥{HIGH_PROB_THRESHOLD}).")
+
+            # 2. Watchlist Auto-Notif (Spesifik per user)
+            # Untuk simplifikasi di versi ini, kita kumpulkan semua watchlist symbol yang unik
+            all_users = self.storage.get_all_users_with_watchlist() # Perlu dipastikan method ini ada
+            if all_users:
+                for user_id in all_users:
+                    wl_symbols = self.storage.get_watchlist(user_id)
+                    if not wl_symbols:
+                        continue
+                    # Scan watchlist dengan threshold lebih rendah (WATCHLIST_ALERT_THRESHOLD)
+                    wl_signals = await self._scan_async(wl_symbols, WATCHLIST_ALERT_THRESHOLD, False, ihsg_chg)
+                    if wl_signals:
+                        msg = "🔔 <b>WATCHLIST ALERT!</b>\nSaham pantauanmu menunjukkan sinyal:\n\n"
+                        for s in wl_signals:
+                            sign = "+" if s['change_pct'] > 0 else ""
+                            msg += f"• <b>{s['symbol']}</b>: Skor {s['score']} ({sign}{s['change_pct']}%)\n"
+                        try:
+                            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+                        except Exception:
+                            pass # User mungkin block bot
+
         except Exception as exc:
             logger.error(f"job_morning_signal: {exc}")
 
@@ -832,8 +863,10 @@ class IDXDayTraderBot:
         # Schedulers
         jq = app.job_queue
         # Schedulers — PTB v20+: 0=Minggu, 1=Senin, 2=Selasa, 3=Rabu, 4=Kamis, 5=Jumat, 6=Sabtu
-        jq.run_daily(self.job_morning_signal,   time(hour=9,  minute=25), days=(1,2,3,4,5))
-        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=25), days=(1,2,3,4,5))
+        # Swing Trading: signal jam 07:00 (sebelum market buka, trader bisa siapkan order)
+        # Update jam 15:30 (setelah market tutup, review EOD & update posisi)
+        jq.run_daily(self.job_morning_signal,   time(hour=7,  minute=0),  days=(1,2,3,4,5))
+        jq.run_daily(self.job_afternoon_update, time(hour=15, minute=30), days=(1,2,3,4,5))
 
         # Background tasks
         self.monitor   = SignalMonitor(app, self.storage)

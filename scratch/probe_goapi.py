@@ -1,55 +1,43 @@
 """
-Probe endpoint historical yang benar berdasarkan Swagger URL pattern.
+Probe semua kemungkinan GoAPI endpoint untuk broker summary.
 """
 import requests
-import json
 
 API_KEY = "631be76d-2000-53c6-5a71-43bef863"
 SYMBOL  = "BBCA"
+DATE    = "2026-05-12"
 
-HEADERS = {
-    "Authorization": API_KEY,
-    "accept": "application/json"
-}
+HEADERS = {"Authorization": API_KEY, "accept": "application/json"}
+PARAMS  = {"api_key": API_KEY, "date": DATE}
 
-ENDPOINTS_TO_TEST = [
-    # Pattern dari Swagger: get_stock_idx__symbol__historical
-    ("GET historical (correct path)", f"https://api.goapi.io/stock/idx/{SYMBOL}/historical"),
-    ("GET historical (correct path v2)", f"https://api.goapi.io/v2/stock/idx/{SYMBOL}/historical"),
-
-    # Harga terakhir yang sudah WORK
-    ("GET prices (confirmed)",       "https://api.goapi.io/stock/idx/prices"),
-
-    # Coba juga trailing tickers
-    ("GET all-stock prices",         "https://api.goapi.io/stock/idx/all-stock"),
+ENDPOINTS = [
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/broker-summary",
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/broker",
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/brokers",
+    f"https://api.goapi.io/stock/idx/broker-summary",
+    f"https://api.goapi.io/stock/idx/broker",
+    f"https://api.goapi.io/v2/stock/idx/{SYMBOL}/broker-summary",
+    # Try foreign flow
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/foreign",
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/net-foreign",
+    f"https://api.goapi.io/stock/idx/foreign-flow",
+    # Try indicators
+    f"https://api.goapi.io/stock/idx/{SYMBOL}/indicators",
+    f"https://api.goapi.io/stock/idx/indicators",
 ]
 
-PARAMS_HIST = {
-    "api_key": API_KEY,
-    "from": "2026-05-01",
-    "to":   "2026-05-12",
-    "interval": "15m",
-}
-PARAMS_PRICE = {
-    "api_key": API_KEY,
-    "symbols": SYMBOL
-}
-
 print(f"{'='*60}")
-print(f"GoAPI Endpoint Probe Round 2")
+print(f"GoAPI Broker Summary Probe")
 print(f"{'='*60}\n")
 
-for label, url in ENDPOINTS_TO_TEST:
-    is_price = "prices" in url or "all-stock" in url
-    params   = PARAMS_PRICE if is_price else PARAMS_HIST
-
+for url in ENDPOINTS:
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        status = resp.status_code
-        body   = resp.text[:300]
-        print(f"[{status}] {label}")
-        print(f"         URL: {resp.url}")
-        print(f"         Body: {body}")
+        r = requests.get(url, params=PARAMS, headers=HEADERS, timeout=8)
+        status = r.status_code
+        body = r.text[:200]
+        print(f"[{status}] {url.replace('https://api.goapi.io', '')}")
+        if status == 200:
+            print(f"         ✅ BERHASIL: {body}")
         print()
     except Exception as e:
-        print(f"[ERR] {label}: {e}\n")
+        print(f"[ERR] {url}: {e}\n")

@@ -1,5 +1,5 @@
 """
-config.py — Central configuration untuk IDX Day Trader Bot.
+config.py — Central configuration untuk IDX Swing Trader Bot.
 Semua parameter diambil dari environment variables (.env).
 """
 from __future__ import annotations
@@ -38,16 +38,29 @@ LQ45_SYMBOLS = [
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Jakarta")
 
 # ── Signal Scoring ────────────────────────────────────────────────────────────
-HIGH_PROB_THRESHOLD = int(os.getenv("HIGH_PROB_THRESHOLD", "75"))
-MIN_RRR             = float(os.getenv("MIN_RRR", "1.3"))
+# Swing Trading v5: 24 indikator, max score ~300+
+# Threshold 120 (sebelumnya 75 untuk day trading 20 ind.)
+HIGH_PROB_THRESHOLD       = int(os.getenv("HIGH_PROB_THRESHOLD",       "120")) # Main signal
+WATCHLIST_ALERT_THRESHOLD = int(os.getenv("WATCHLIST_ALERT_THRESHOLD", "100")) # Watchlist notif
+MIN_RRR                   = float(os.getenv("MIN_RRR",                  "1.5")) # Swing RRR
+
 
 # ── Analyzer Timeframe ────────────────────────────────────────────────────────
-DATA_PERIOD   = os.getenv("DATA_PERIOD",   "59d")   # WAJIB <=59d untuk Yahoo 15m
-DATA_INTERVAL = os.getenv("DATA_INTERVAL", "15m")
+# Swing Trading: gunakan data harian (1D) dari GoAPI
+# 15m tidak cocok untuk swing karena yfinance delay ~15 menit
+DATA_PERIOD   = os.getenv("DATA_PERIOD",   "2y")   # 2 tahun data harian
+DATA_INTERVAL = os.getenv("DATA_INTERVAL", "1d")   # Daily candle
+
+# ── Swing Trading Parameters ──────────────────────────────────────────────────
+SWING_HOLD_DAYS          = int(os.getenv("SWING_HOLD_DAYS",     "5"))    # Target hold 5 hari
+SWING_ATR_SL_MULTIPLIER  = float(os.getenv("SWING_ATR_SL",      "2.0")) # SL = 2x ATR
+SWING_ATR_TP1_MULTIPLIER = float(os.getenv("SWING_ATR_TP1",     "2.5")) # TP1 = 2.5x ATR
+SWING_ATR_TP2_MULTIPLIER = float(os.getenv("SWING_ATR_TP2",     "4.0")) # TP2 = 4x ATR
+SWING_ANTI_CHASE_PCT     = float(os.getenv("SWING_ANTI_CHASE",  "7.0")) # Jangan kejar jika naik >7% dari low recent
 
 # ── Volume & Liquidity Filters ────────────────────────────────────────────────
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "0.3"))
-MIN_VOLUME_ABS   = int(os.getenv("MIN_VOLUME_ABS",   "500000"))   # 500rb lembar/candle
+MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "0.8"))     # Swing: volume minimal 80% rata-rata
+MIN_VOLUME_ABS   = int(os.getenv("MIN_VOLUME_ABS",   "5000000"))   # 5 juta lembar/hari (swing)
 MIN_ADX          = int(os.getenv("MIN_ADX",          "20"))
 MAX_SPREAD_PCT   = float(os.getenv("MAX_SPREAD_PCT", "3.0"))
 
@@ -55,7 +68,7 @@ MAX_SPREAD_PCT   = float(os.getenv("MAX_SPREAD_PCT", "3.0"))
 ACCOUNT_SIZE             = float(os.getenv("ACCOUNT_SIZE",             "100000000"))  # Rp 100 juta default
 RISK_PER_TRADE_PCT       = float(os.getenv("RISK_PER_TRADE_PCT",       "0.005"))      # 0.5% per trade
 DAILY_MAX_LOSS_R         = float(os.getenv("DAILY_MAX_LOSS_R",         "1.5"))        # Stop trading di -1.5R/hari
-MAX_OPEN_POSITIONS       = int(os.getenv("MAX_OPEN_POSITIONS",         "3"))          # Maks 3 posisi bersamaan
+MAX_OPEN_POSITIONS       = int(os.getenv("MAX_OPEN_POSITIONS",         "5"))          # Swing: maks 5 posisi
 LOT_SIZE                 = int(os.getenv("LOT_SIZE",                   "100"))        # IDX: 1 lot = 100 lembar
 BUY_FEE_PCT              = float(os.getenv("BUY_FEE_PCT",              "0.0015"))     # 0.15% broker buy
 SELL_FEE_PCT             = float(os.getenv("SELL_FEE_PCT",             "0.0025"))     # 0.25% broker sell

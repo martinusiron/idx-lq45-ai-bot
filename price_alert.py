@@ -30,9 +30,10 @@ class PriceAlertManager:
     """
 
     def __init__(self, app) -> None:
-        self.app      = app
-        self.alerts:  dict[str, list[dict]] = {}   # user_id → list alerts
-        self.running  = False
+        self.app       = app
+        self.alerts:   dict[str, list[dict]] = {}   # user_id → list alerts
+        self.running   = False
+        self._goapi_ok = True  # Circuit breaker: False jika quota habis
 
     # ── CRUD ──────────────────────────────────────────────────────────
     def add_alert(self, user_id: str, chat_id: str, symbol: str,
@@ -82,10 +83,9 @@ class PriceAlertManager:
         return result
 
     # ── Price Fetch ───────────────────────────────────────────────────
-    @staticmethod
-    def _fetch_price(symbol: str) -> float | None:
-        """Fetch harga terakhir. Prioritas GoAPI."""
-        if GOAPI_API_KEY:
+    def _fetch_price(self, symbol: str) -> float | None:
+        """Fetch harga terakhir. Prioritas GoAPI, fallback ke yfinance."""
+        if GOAPI_API_KEY and self._goapi_ok:
             try:
                 url = "https://api.goapi.io/stock/idx/prices"
                 params = {
@@ -94,14 +94,23 @@ class PriceAlertManager:
                 }
                 headers = {"Authorization": GOAPI_API_KEY}
                 resp = requests.get(url, params=params, headers=headers, timeout=10)
-                if resp.status_code == 200:
+
+                if resp.status_code in (402, 429):
+                    logger.warning("[alert] GoAPI quota habis! Beralih ke yfinance.")
+                    self._goapi_ok = False
+                elif resp.status_code == 200:
                     data = resp.json()
-                    if data.get("status") == "success":
+                    msg  = data.get("message", "").lower()
+                    if any(kw in msg for kw in ("quota", "limit", "exceeded", "upgrade")):
+                        logger.warning(f"[alert] GoAPI quota dari body: '{msg}'")
+                        self._goapi_ok = False
+                    elif data.get("status") == "success":
                         results = data.get("data", {}).get("results", [])
                         for res in results:
-                            sym_key = res.get("symbol", "")
-                            if sym_key == params["symbols"]:
+                            if res.get("symbol", "") == params["symbols"]:
                                 return float(res.get("close") or res.get("last") or 0)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                logger.warning("[alert] GoAPI tidak bisa dihubungi, fallback ke yfinance")
             except Exception as e:
                 logger.warning(f"[alert] GoAPI fetch error: {e}")
 

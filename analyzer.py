@@ -1,7 +1,7 @@
 """
-analyzer.py — IDX Day Trader Signal Engine v4
+analyzer.py — IDX Swing Trader Signal Engine v5
 
-20 indikator teknikal + MTF + anti-chasing + IHSG correlation.
+20 indikator teknikal + MTF Weekly + Broker Summary + anti-FOMO + IHSG correlation.
 Compatible dengan repo martinusiron/idx-lq45-ai-bot.
 """
 from __future__ import annotations
@@ -14,43 +14,48 @@ import ta
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
-from config import DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS, GOAPI_API_KEY
+from config import (DATA_INTERVAL, DATA_PERIOD, MIN_VOLUME_ABS, GOAPI_API_KEY,
+                   SWING_ATR_SL_MULTIPLIER, SWING_ATR_TP1_MULTIPLIER,
+                   SWING_ATR_TP2_MULTIPLIER, SWING_ANTI_CHASE_PCT)
 
 logger = logging.getLogger(__name__)
 
 
 class StockAnalyzer:
     """
-    IDX Day Trader Analyzer — v4
+    IDX Swing Trader Analyzer — v5
 
     Indikator:
      1. EMA20 vs EMA50          — Trend filter
-     2. RSI (14)                — Momentum
-     3. Stochastic (14,3,3)     — Double konfirmasi
-     4. MACD (12,26,9)          — Crossover & histogram
-     5. ATR (14)                — Volatility-based TP/SL
-     6. Volume Ratio            — Spike detection
-     7. Candlestick Pattern     — Hammer, Engulfing, Morning Star, Marubozu
-     8. Market Condition        — Trending vs Sideways multiplier
-     9. VWAP                    — Institutional intraday benchmark
+     2. EMA10 vs EMA20          — Short-term momentum
+     3. RSI (14)                — Momentum oversold/overbought
+     4. Stochastic (14,3,3)     — Double konfirmasi
+     5. MACD (12,26,9)          — Crossover & histogram
+     6. ATR (14)                — Volatility-based TP/SL
+     7. Volume Ratio            — Spike detection
+     8. Candlestick Pattern     — Hammer, Engulfing, Morning Star, Marubozu
+     9. Market Condition        — Trending vs Sideways multiplier
     10. Bollinger Bands         — Squeeze & oversold detection
     11. ADX (14)                — Trend strength filter
     12. OBV Divergence          — Volume/price confirmation
     13. Support/Resistance      — Multi-level pivot detection
     14. Gap Detection           — Gap up/down scoring
     15. RSI Divergence          — Bullish divergence
-    16. Anti-Chasing            — Block FOMO entry (>3% dari open)
+    16. Anti-FOMO               — Block entry jika sudah naik >7% dari swing low
     17. Bid-Ask Spread Proxy    — Filter likuiditas buruk
-    18. MTF Daily Confirmation  — Konfirmasi trend harian
+    18. MTF Weekly Confirmation — Konfirmasi trend mingguan (dari daily)
     19. Relative Strength IHSG  — Saham lebih kuat dari indeks
     20. IHSG Correlation        — Penalty saat market merah
+    21. Consecutive Candles     — 3+ hari candle bullish berturut
+    22. Weekly Breakout         — Breakout dari range 20 hari
     """
 
     def __init__(self) -> None:
         self.min_data_points  = 60
-        self.min_volume_ratio = 0.3
+        self.min_volume_ratio = 0.8   # Daily: butuh volume lebih stabil
         self.min_adx          = 20
         self.max_spread_pct   = 3.0
+        self._goapi_ok        = True   # Circuit breaker: False jika quota habis
 
     # ------------------------------------------------------------------ #
     #  DATA FETCHING
@@ -61,8 +66,15 @@ class StockAnalyzer:
         period: str = DATA_PERIOD,
         interval: str = DATA_INTERVAL,
     ) -> pd.DataFrame | None:
-        """Fetch OHLCV. Prioritas GoAPI jika ada API Key, fallback ke Yahoo."""
-        if GOAPI_API_KEY:
+        """Fetch OHLCV. Prioritas GoAPI jika ada API Key, fallback ke yfinance.
+        
+        Fallback otomatis ke yfinance jika:
+        - GOAPI_API_KEY tidak ada
+        - GoAPI quota habis (terdeteksi dari status 402/429 atau pesan error)
+        - GoAPI timeout / tidak bisa dihubungi
+        - GoAPI mengembalikan data kosong
+        """
+        if GOAPI_API_KEY and self._goapi_ok:
             df = self._fetch_goapi(symbol, interval)
             if df is not None and not df.empty:
                 return df
@@ -87,6 +99,93 @@ class StockAnalyzer:
             logger.error(f"[{symbol}] fetch_data error: {exc}")
             return None
 
+    def bulk_prefilter(
+        self,
+        symbols: list[str],
+        min_volume: int = 5_000_000,
+        min_change_pct: float = -3.0,
+    ) -> list[str]:
+        """Pre-filter cepat menggunakan GoAPI /stock/idx/indicators (1 request).
+        
+        Mengembalikan subset symbols yang layak di-analyze lebih lanjut.
+        Jika GoAPI tidak tersedia, kembalikan semua symbols (no filter).
+        
+        Keuntungan: mengurangi full-history fetch dari 61 → ~10-20 saham.
+        """
+        if not GOAPI_API_KEY or not self._goapi_ok:
+            return symbols  # No pre-filter, analyze all
+
+        try:
+            url  = "https://api.goapi.io/stock/idx/indicators"
+            resp = requests.get(
+                url,
+                params={"api_key": GOAPI_API_KEY},
+                headers={"Authorization": GOAPI_API_KEY, "accept": "application/json"},
+                timeout=15,
+            )
+
+            if resp.status_code in (402, 429):
+                logger.warning("[bulk_prefilter] GoAPI quota habis, skip pre-filter")
+                self._goapi_ok = False
+                return symbols
+
+            if resp.status_code != 200:
+                logger.warning(f"[bulk_prefilter] GoAPI {resp.status_code}, skip pre-filter")
+                return symbols
+
+            data = resp.json()
+            msg  = data.get("message", "").lower()
+            if any(kw in msg for kw in ("quota", "limit", "exceeded", "upgrade")):
+                self._goapi_ok = False
+                return symbols
+
+            results = data.get("data", {}).get("results", [])
+            if not results:
+                return symbols
+
+            # Build lookup table: symbol → latest row
+            sym_set = {s.upper().replace(".JK", "") for s in symbols}
+            lookup  = {}
+            for row in results:
+                sym = str(row.get("symbol", "")).upper()
+                if sym in sym_set:
+                    lookup[sym] = row
+
+            # Filter: volume cukup + tidak turun terlalu dalam
+            passed = []
+            for sym in symbols:
+                key = sym.upper().replace(".JK", "")
+                row = lookup.get(key)
+                if row is None:
+                    passed.append(sym)  # Data tidak ada → tetap analyze
+                    continue
+
+                vol    = float(row.get("volume", 0) or 0)
+                close  = float(row.get("close",  0) or 0)
+                prev   = float(row.get("Prev",   close) or close)
+                change = ((close - prev) / prev * 100) if prev > 0 else 0
+
+                if vol >= min_volume and change >= min_change_pct:
+                    passed.append(sym)
+                else:
+                    logger.info(
+                        f"[prefilter] {key} dibuang: vol={vol:,.0f}, chg={change:.1f}%"
+                    )
+
+            logger.info(
+                f"[bulk_prefilter] {len(symbols)} → {len(passed)} saham lolos pre-filter "
+                f"(hemat {len(symbols)-len(passed)} full-fetch)"
+            )
+            return passed
+
+        except Exception as exc:
+            logger.warning(f"[bulk_prefilter] error: {exc}, skip pre-filter")
+            return symbols
+
+
+    # Kata kunci yang mengindikasikan quota habis di GoAPI
+    _QUOTA_KEYWORDS = ("quota", "limit", "exceeded", "upgrade", "plan", "403", "payment")
+
     def _fetch_goapi(self, symbol: str, interval: str) -> pd.DataFrame | None:
         """Fetch historical daily candles dari GoAPI.io.
         
@@ -100,7 +199,8 @@ class StockAnalyzer:
 
         try:
             to_date   = datetime.now()
-            from_date = to_date - timedelta(days=365)  # Maks 1 tahun data
+            # GoAPI limit: maks 1 tahun (365 hari) per request.
+            from_date = to_date - timedelta(days=365)
 
             url    = f"https://api.goapi.io/stock/idx/{symbol.upper().replace('.JK', '')}/historical"
             params = {
@@ -113,11 +213,31 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] Fetching GoAPI daily from {params['from']} to {params['to']}")
             resp = requests.get(url, params=params, headers=headers, timeout=15)
 
+            # ── Deteksi quota habis ─────────────────────────────────────
+            if resp.status_code in (402, 429):
+                logger.warning(
+                    f"[GoAPI] Quota/rate limit! HTTP {resp.status_code}. "
+                    "Beralih ke yfinance untuk sesi ini."
+                )
+                self._goapi_ok = False  # Circuit breaker aktif
+                return None
+
             if resp.status_code != 200:
                 logger.error(f"[{symbol}] GoAPI Error {resp.status_code}: {resp.text[:200]}")
                 return None
 
             json_data = resp.json()
+            msg = json_data.get("message", "").lower()
+
+            # Cek quota dari pesan di body response (walau status 200)
+            if any(kw in msg for kw in self._QUOTA_KEYWORDS):
+                logger.warning(
+                    f"[GoAPI] Quota habis terdeteksi dari response: '{msg}'. "
+                    "Beralih ke yfinance untuk sesi ini."
+                )
+                self._goapi_ok = False
+                return None
+
             if json_data.get("status") != "success":
                 logger.warning(f"[{symbol}] GoAPI status failed: {json_data.get('message')}")
                 return None
@@ -144,25 +264,22 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] GoAPI success: {len(df)} daily rows")
             return df
 
+        except requests.exceptions.Timeout:
+            logger.warning(f"[{symbol}] GoAPI timeout, fallback ke yfinance")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"[{symbol}] GoAPI tidak bisa dihubungi, fallback ke yfinance")
+            return None
         except Exception as exc:
             logger.error(f"[{symbol}] _fetch_goapi exception: {exc}")
             return None
 
     def fetch_daily(self, symbol: str) -> pd.DataFrame | None:
-        """Fetch data daily untuk MTF confirmation."""
-        try:
-            ticker = f"{symbol}.JK" if not symbol.endswith(".JK") else symbol
-            df = yf.download(ticker, period="6mo", interval="1d",
-                             progress=False, auto_adjust=True)
-            if df.empty or len(df) < 20:
-                return None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df.columns = [c.lower() for c in df.columns]
-            return df
-        except Exception as exc:
-            logger.warning(f"[{symbol}] fetch_daily error: {exc}")
-            return None
+        """Fetch data daily untuk MTF confirmation.
+        Karena primary interval sudah 1d, ini langsung pakai fetch_data.
+        """
+        # Primary sudah 1D — reuse data yang sama untuk MTF Weekly
+        return self.fetch_data(symbol)
 
     def fetch_ihsg(self) -> float | None:
         """Fetch % perubahan IHSG hari ini."""
@@ -337,13 +454,114 @@ class StockAnalyzer:
 
     @staticmethod
     def _is_chasing(df: pd.DataFrame) -> bool:
-        """Return True jika harga sudah naik >3% dari open hari ini."""
+        """Swing anti-FOMO: jangan masuk jika sudah naik >X% dari swing low 5 hari."""
         try:
-            today_open = float(df["open"].iloc[0])
+            recent_low = float(df["low"].iloc[-5:].min())
             current    = float(df["close"].iloc[-1])
-            return (current - today_open) / today_open * 100 > 3.0
+            return (current - recent_low) / recent_low * 100 > SWING_ANTI_CHASE_PCT
         except Exception:
             return False
+
+    @staticmethod
+    def _consecutive_bullish(df: pd.DataFrame, n: int = 3) -> tuple[int, bool]:
+        """Hitung berapa hari candle bullish berturut-turut."""
+        try:
+            count = 0
+            for i in range(-1, -min(10, len(df)), -1):
+                if float(df["close"].iloc[i]) > float(df["open"].iloc[i]):
+                    count += 1
+                else:
+                    break
+            return count, count >= n
+        except Exception:
+            return 0, False
+
+    @staticmethod
+    def _weekly_breakout(df: pd.DataFrame, lookback: int = 20) -> tuple[bool, int]:
+        """Cek apakah harga breakout dari range 20 hari (4 minggu)."""
+        try:
+            if len(df) < lookback + 1:
+                return False, 0
+            hist = df.iloc[-(lookback+1):-1]
+            high_20 = float(hist["high"].max())
+            current = float(df["close"].iloc[-1])
+            if current > high_20:
+                return True, 25   # Breakout kuat
+            return False, 0
+        except Exception:
+            return False, 0
+
+    @staticmethod
+    def _mtf_weekly_from_daily(df_daily: pd.DataFrame | None) -> tuple[str, int]:
+        """Konfirmasi trend weekly dari data harian (synthetic weekly candle)."""
+        if df_daily is None or len(df_daily) < 10:
+            return "unknown", 0
+        try:
+            # EMA Weekly proxy: EMA(5) pada data daily ~ EMA(1) pada weekly
+            ema5w  = df_daily["close"].ewm(span=5).mean()
+            ema10w = df_daily["close"].ewm(span=10).mean()
+            price  = float(df_daily["close"].iloc[-1])
+            if ema5w.iloc[-1] > ema10w.iloc[-1] and price > ema5w.iloc[-1]:
+                return "weekly_uptrend", 20
+            if ema5w.iloc[-1] < ema10w.iloc[-1]:
+                return "weekly_downtrend", -20
+            return "weekly_neutral", 0
+        except Exception:
+            return "unknown", 0
+
+    @staticmethod
+    def _wyckoff_phase(df: pd.DataFrame) -> tuple[str, int]:
+        """Deteksi fase Wyckoff: Accumulation / Markup / Distribution / Markdown."""
+        try:
+            if len(df) < 60:
+                return "unknown", 0
+            close   = df["close"]
+            volume  = df["volume"]
+            high52  = float(close.iloc[-252:].max()) if len(close) >= 252 else float(close.max())
+            low52   = float(close.iloc[-252:].min()) if len(close) >= 252 else float(close.min())
+            current = float(close.iloc[-1])
+            if high52 == low52:
+                return "unknown", 0
+            pos_pct    = (current - low52) / (high52 - low52) * 100
+            vol_avg20  = float(volume.iloc[-20:].mean())
+            vol_avg5   = float(volume.iloc[-5:].mean())
+            vol_rising = vol_avg5 > vol_avg20 * 1.1
+            if pos_pct < 25:
+                return ("accumulation", 20) if vol_rising else ("markdown", -15)
+            elif pos_pct < 50:
+                return "early_markup", 15
+            elif pos_pct < 75:
+                return ("markup", 10) if vol_rising else ("markup_weak", 5)
+            else:
+                return ("distribution", -10) if vol_rising else ("late_markup", 0)
+        except Exception:
+            return "unknown", 0
+
+    @staticmethod
+    def _price_action_quality(df: pd.DataFrame) -> tuple[int, str]:
+        """Score kualitas price action 5 candle terakhir (0-20).
+        Candle berkualitas: body besar + lower wick dominan (buying pressure).
+        """
+        try:
+            total = 0
+            for _, row in df.iloc[-5:].iterrows():
+                body = abs(float(row["close"]) - float(row["open"]))
+                rng  = float(row["high"]) - float(row["low"])
+                if rng == 0:
+                    continue
+                br  = body / rng
+                lwr = (min(float(row["close"]), float(row["open"])) - float(row["low"])) / rng
+                if br > 0.6 and float(row["close"]) > float(row["open"]):
+                    total += 4
+                elif br > 0.4 and float(row["close"]) > float(row["open"]):
+                    total += 2
+                elif lwr > 0.5:
+                    total += 2
+            score = min(20, total)
+            label = "PA Quality ✨" if score >= 15 else ("PA Sedang" if score >= 10 else "")
+            return score, label
+        except Exception:
+            return 0, ""
 
     @staticmethod
     def _spread_proxy(df: pd.DataFrame) -> float:
@@ -368,6 +586,8 @@ class StockAnalyzer:
             return None
 
         # ── Indikator ──────────────────────────────────────────────────
+        # Hitung EMA10 tambahan untuk swing momentum
+        df["ema10"] = ta.trend.ema_indicator(df["close"], window=10)
         df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
         df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
         df["rsi"]   = ta.momentum.rsi(df["close"], window=14)
@@ -388,8 +608,10 @@ class StockAnalyzer:
         df["vol_ma"]    = df["volume"].rolling(window=20).mean()
         df["vol_ratio"] = df["volume"] / df["vol_ma"].replace(0, np.nan)
 
+        # Untuk swing trading, VWAP tidak relevan pada daily candle
+        # Gantikan dengan harga tengah (mid price) sebagai referensi
         try:
-            df["vwap"] = self._calc_vwap(df)
+            df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3  # Typical price
         except Exception:
             df["vwap"] = df["close"]
 
@@ -443,22 +665,24 @@ class StockAnalyzer:
         # ── Scoring ────────────────────────────────────────────────────
         score, reasons = 0, []
 
-        # 1. EMA Trend
+        # 1. EMA Trend (jangka menengah)
         if latest["ema20"] > latest["ema50"]:
-            score += 20; reasons.append("Uptrend EMA20>50")
+            score += 20; reasons.append("EMA20>50 Uptrend")
 
-        # 2. Price vs EMA20
-        if latest["close"] > latest["ema20"]:
-            score += 15; reasons.append("Harga > EMA20")
+        # 2. EMA10 vs EMA20 (momentum pendek)
+        if latest["ema10"] > latest["ema20"]:
+            score += 15; reasons.append("EMA10>20 Momentum ✅")
 
-        # 3. RSI
+        # 3. RSI (swing: oversold zone 35-50 lebih ideal dari 30-45)
         rsi = float(latest["rsi"])
-        if 30 <= rsi <= 45:
-            score += 30; reasons.append(f"RSI Rebound ({rsi:.0f})")
-        elif 45 < rsi <= 60:
-            score += 15
+        if 35 <= rsi <= 50:
+            score += 25; reasons.append(f"RSI Rebound Ideal ({rsi:.0f})")
+        elif 50 < rsi <= 60:
+            score += 15; reasons.append(f"RSI Momentum ({rsi:.0f})")
+        elif rsi < 35:
+            score += 10; reasons.append(f"RSI Oversold ({rsi:.0f})")
         elif rsi > 70:
-            score -= 10
+            score -= 15; reasons.append(f"RSI Overbought ({rsi:.0f}) ⚠️")
 
         # 4. Stochastic
         sk = float(latest["stoch_k"])
@@ -496,11 +720,10 @@ class StockAnalyzer:
         elif market == "trending_down":
             score = int(score * 0.70)
 
-        # 9. VWAP
-        if float(latest["close"]) > float(latest["vwap"]):
-            score += 20; reasons.append("Harga > VWAP 📊")
-        elif float(latest["close"]) < float(latest["vwap"]) * 0.99:
-            score -= 10
+        # 9. Price vs Typical Price (menggantikan VWAP daily)
+        typical = float(latest["vwap"])  # (H+L+C)/3
+        if float(latest["close"]) > typical:
+            score += 10; reasons.append("Close > Typical Price")
 
         # 10. Bollinger Bands
         is_squeeze, touch_lower = self._detect_bb_squeeze(df)
@@ -550,14 +773,14 @@ class StockAnalyzer:
 
         # 16-17 sudah handle di pre-filter gates (anti-chasing, spread)
 
-        # 18. MTF Daily Confirmation
-        df_daily = self.fetch_daily(symbol)
-        mtf_trend, mtf_score = self._mtf_confirmation(df_daily)
+        # 18. MTF Weekly Confirmation (dari data harian)
+        df_daily    = self.fetch_daily(symbol)
+        mtf_trend, mtf_score = self._mtf_weekly_from_daily(df_daily)
         score += mtf_score
-        if mtf_trend == "daily_uptrend":
-            reasons.append("MTF Uptrend ✅")
-        elif mtf_trend == "daily_downtrend":
-            reasons.append("MTF Downtrend ⚠️")
+        if mtf_trend == "weekly_uptrend":
+            reasons.append("Weekly Uptrend ✅")
+        elif mtf_trend == "weekly_downtrend":
+            reasons.append("Weekly Downtrend ⚠️")
 
         # 19. Relative Strength vs IHSG
         rs_stronger, rs_score = self._relative_strength(df, ihsg_chg)
@@ -570,6 +793,33 @@ class StockAnalyzer:
             score = int(score * 0.75)
             logger.info(f"[{symbol}] IHSG penalty applied: {ihsg_chg}%")
 
+        # 21. Consecutive Bullish Candles
+        consec_count, is_consec = self._consecutive_bullish(df, n=3)
+        if is_consec:
+            score += 15; reasons.append(f"{consec_count} Hari Bullish Berturut ✅")
+
+        # 22. Weekly Breakout (20-day high)
+        is_breakout, bo_score = self._weekly_breakout(df)
+        if is_breakout:
+            score += bo_score; reasons.append("Breakout 20-Day High 🚀")
+
+        # 23. Wyckoff Phase Detection
+        wyckoff_phase, wyckoff_score = self._wyckoff_phase(df)
+        score += wyckoff_score
+        if wyckoff_phase == "accumulation":
+            reasons.append("Wyckoff: Accumulation 🏦")
+        elif wyckoff_phase == "early_markup":
+            reasons.append("Wyckoff: Early Markup ⬆️")
+        elif wyckoff_phase == "distribution":
+            reasons.append("Wyckoff: Distribution ⚠️")
+        elif wyckoff_phase == "markdown":
+            reasons.append("Wyckoff: Markdown 📉")
+
+        # 24. Price Action Quality Score
+        pa_score, pa_label = self._price_action_quality(df)
+        if pa_score >= 10:
+            score += pa_score; reasons.append(pa_label)
+
         logger.info(
             f"[{symbol}] score={score}, threshold={threshold}, "
             f"market={market}, adx={adx:.1f}, mtf={mtf_trend}"
@@ -579,27 +829,37 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] TIDAK LOLOS threshold ({score} < {threshold})")
             return None
 
-        # ── Entry / TP / SL Professional Grade ────────────────────────
+        # ── Entry / TP / SL — Swing Trading Grade ─────────────────────
         price    = round(float(latest["close"]), 2)
         atr      = round(float(latest["atr"]), 2)
-        vwap_val = round(float(latest["vwap"]), 0)
         bb_lower = round(float(latest["bb_lower"]), 0)
 
-        entry_data = self._calc_best_entry(price, support, vwap_val, bb_lower)
+        # Swing entry: beli di closing hari ini atau limit esok pagi
+        entry_data = self._calc_best_entry(price, support,
+                                           round(float(latest["vwap"]), 0), bb_lower)
         best_entry = entry_data["best_entry"]
         entry_type = entry_data["entry_type"]
 
-        # SL — swing low - 0.5% buffer vs ATR; ambil yang lebih ketat (lebih tinggi)
-        sl = int(max(round(support * 0.995, 0), round(price - atr * 1.5, 0)))
-        sl_distance = price - sl if price - sl > 0 else price * 0.015
+        # SL — swing lebih lebar: 2x ATR di bawah swing low
+        sl = int(max(
+            round(support * 0.99, 0),
+            round(price - atr * SWING_ATR_SL_MULTIPLIER, 0)
+        ))
+        sl_distance = price - sl if price - sl > 0 else price * 0.02
 
-        # TP1 — resistance terdekat (konservatif)
-        tp1 = int(max(round(resistance * 0.995, 0), round(price + atr * 1.5, 0)))
+        # TP1 — 2.5x ATR atau resistance terdekat
+        tp1 = int(max(
+            round(resistance * 0.99, 0),
+            round(price + atr * SWING_ATR_TP1_MULTIPLIER, 0)
+        ))
 
-        # TP2 — Fibonacci 1.618 extension
-        rec20     = df.iloc[-20:]
-        fib_tp2   = round(float(rec20["low"].min()) + (float(rec20["high"].max()) - float(rec20["low"].min())) * 1.618, 0)
-        tp2       = int(fib_tp2) if fib_tp2 > tp1 else int(tp1 * 1.03)
+        # TP2 — Fibonacci 1.618 extension (lebih jauh untuk swing)
+        rec20   = df.iloc[-20:]
+        fib_tp2 = round(
+            float(rec20["low"].min()) +
+            (float(rec20["high"].max()) - float(rec20["low"].min())) * 1.618, 0
+        )
+        tp2 = int(fib_tp2) if fib_tp2 > tp1 * 1.05 else int(tp1 * 1.08)
 
         e2sl = best_entry - sl
         rrr  = round((tp1 - best_entry) / e2sl, 2) if e2sl > 0 else 0
@@ -620,7 +880,7 @@ class StockAnalyzer:
             "support":           int(support),
             "resistance":        int(resistance),
             "adx":               round(adx, 1),
-            "vwap":              int(vwap_val),
+            "vwap":              int(round(float(latest["vwap"]), 0)),
             "bb_pct":            round(float(latest["bb_pct"]), 2),
             "bb_lower":          int(bb_lower),
             "rsi":               round(rsi, 1),
@@ -637,4 +897,7 @@ class StockAnalyzer:
             "rs_stronger":       rs_stronger,
             "spread_pct":        round(spread, 2),
             "alasan":            alasan,
+            "consec_bullish":    consec_count,
+            "is_breakout":       is_breakout,
+            "hold_days":         5,  # Target swing hold
         }
