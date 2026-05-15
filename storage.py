@@ -352,6 +352,21 @@ class TradingStorage:
             self._bool_value(result["finalized"]), now, trade_date, symbol,
         ))
 
+    def update_trade_sl(self, trade_date: str, symbol: str, new_sl: float) -> None:
+        """Update Stop Loss untuk keperluan Trailing Stop."""
+        now = datetime.utcnow().isoformat()
+        if self.backend == "supabase":
+            self._supabase_request(
+                "PATCH", "trades",
+                params={"trade_date": f"eq.{trade_date}", "symbol": f"eq.{symbol}"},
+                json={"sl": new_sl, "updated_at": now},
+            )
+            return
+
+        p = self.placeholder
+        sql = f"UPDATE trades SET sl={p}, updated_at={p} WHERE trade_date={p} AND symbol={p}"
+        self._execute(sql, (new_sl, now, trade_date, symbol))
+
     def get_trade_plans(self, trade_date: str, include_finalized: bool = True) -> list[dict]:
         if self.backend == "supabase":
             params = {

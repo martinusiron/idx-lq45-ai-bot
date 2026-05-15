@@ -105,6 +105,31 @@ class SignalMonitor:
 
             pnl = round((price - entry) / entry * 100, 2)
 
+            # ── Trailing Stop Logic ────────────────────────────────────
+            import json
+            snapshot = json.loads(trade.get("analyzer_snapshot", "{}"))
+            atr = float(snapshot.get("atr", 0))
+            if atr > 0:
+                new_sl = sl
+                # 1. Break-even jika harga naik 1 ATR
+                if price >= entry + atr and sl < entry:
+                    new_sl = entry
+                # 2. Trailing Stop dinamis setelah lewati TP1
+                if price >= tp1:
+                    ts_level = price - (1.5 * atr)
+                    if ts_level > new_sl:
+                        new_sl = ts_level
+                
+                if new_sl > sl:
+                    self.storage.update_trade_sl(trade_date, sym, new_sl)
+                    await self._alert(chat_id,
+                        f"🛡️ <b>TRAILING STOP UPDATED — {sym}</b>\n"
+                        f"Harga  : Rp {int(price):,}\n"
+                        f"SL Baru: Rp {int(new_sl):,}\n"
+                        f"<i>Profit terkunci saat trend berlanjut.</i>"
+                    )
+                    sl = new_sl  # Update variable local untuk check berikutnya
+
             if sl > 0 and price <= sl:
                 self.storage.update_trade_result(
                     trade_date, sym,

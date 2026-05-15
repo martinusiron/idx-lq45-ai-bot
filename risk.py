@@ -59,6 +59,7 @@ class RiskEngine:
         open_positions: int,
         realized_r: float,
         risk_off: bool = False,
+        ihsg_chg: float | None = None,
     ) -> tuple[PositionPlan | None, str]:
         can_open, reason = self.can_open_trade(open_positions, realized_r)
         if not can_open:
@@ -76,10 +77,21 @@ class RiskEngine:
         risk_amount = self.account_size * self.risk_per_trade_pct
         size_mode = "normal"
         notes = "Ukuran posisi normal."
+        
+        # ── Dynamic Position Sizing ──────────────────────────────────────
         if risk_off:
             risk_amount *= self.risk_off_size_multiplier
             size_mode = "risk_off_reduced"
             notes = "Risk-off aktif: ukuran posisi diperkecil."
+        elif ihsg_chg is not None:
+            if ihsg_chg >= 0.5:
+                risk_amount *= 1.25 # Aggressive Mode (+25% risk)
+                size_mode = "aggressive"
+                notes = "IHSG Bullish (>0.5%): Risk dinaikkan (Aggressive)."
+            elif ihsg_chg <= -0.5:
+                risk_amount *= 0.75 # Defensive Mode (-25% risk)
+                size_mode = "defensive"
+                notes = "IHSG Bearish (<-0.5%): Risk diturunkan (Defensive)."
 
         raw_qty = floor(risk_amount / per_share_risk)
         lot_qty = (raw_qty // self.lot_size) * self.lot_size

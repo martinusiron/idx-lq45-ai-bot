@@ -12,10 +12,10 @@ from datetime import time
 
 from google import genai
 from google.genai import types as genai_types
-from telegram import Update, constants
+from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
-    Defaults, MessageHandler, filters,
+    Defaults, MessageHandler, CallbackQueryHandler, filters,
 )
 
 from analyzer import StockAnalyzer
@@ -130,7 +130,7 @@ class IDXDayTraderBot:
     async def _get_ihsg_async(self) -> float | None:
         return await asyncio.get_event_loop().run_in_executor(None, self.analyzer.fetch_ihsg)
 
-    def _build_trade_plans(self, signals: list[dict], macro: dict) -> list[dict]:
+    def _build_trade_plans(self, signals: list[dict], macro: dict, ihsg_chg: float | None = None) -> list[dict]:
         trade_date = self._trade_date()
         realized_r = self.storage.get_daily_realized_r(trade_date)
         risk_off   = macro.get("is_risk_off", False)
@@ -145,6 +145,7 @@ class IDXDayTraderBot:
             plan, reason = self.risk.plan_position(
                 entry=signal["best_entry"], stop=signal["sl"],
                 open_positions=len(plans), realized_r=realized_r, risk_off=risk_off,
+                ihsg_chg=ihsg_chg
             )
             if plan is None:
                 logger.info(f"[{signal['symbol']}] plan skipped: {reason}")
@@ -209,9 +210,17 @@ class IDXDayTraderBot:
             await send(self.formatter.format_macro_context(macro), parse_mode="HTML")
 
             if signals:
-                plans = self._build_trade_plans(signals, macro)
+                plans = self._build_trade_plans(signals, macro, ihsg_chg)
                 if plans:
-                    await send(self.formatter.format_morning_signal(plans), parse_mode="HTML")
+                    keyboard = []
+                    for p in plans:
+                        sym = p["symbol"]
+                        keyboard.append([
+                            InlineKeyboardButton(f"🔍 Detail {sym}", callback_data=f"detail_{sym}"),
+                            InlineKeyboardButton(f"👀 Watch {sym}", callback_data=f"watch_{sym}")
+                        ])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await send(self.formatter.format_morning_signal(plans), parse_mode="HTML", reply_markup=reply_markup)
             else:
                 await send(f"📭 Tidak ada setup LQ45 hari ini (Skor≥{HIGH_PROB_THRESHOLD}).")
 
@@ -334,9 +343,17 @@ class IDXDayTraderBot:
         if not signals:
             await update.message.reply_text(f"📭 Tidak ada setup (Skor≥{HIGH_PROB_THRESHOLD} & RRR≥{MIN_RRR}).")
             return
-        plans = self._build_trade_plans(signals, macro)
+        plans = self._build_trade_plans(signals, macro, ihsg_chg)
         if plans:
-            await update.message.reply_text(self.formatter.format_morning_signal(plans), parse_mode="HTML")
+            keyboard = []
+            for p in plans:
+                sym = p["symbol"]
+                keyboard.append([
+                    InlineKeyboardButton(f"🔍 Detail {sym}", callback_data=f"detail_{sym}"),
+                    InlineKeyboardButton(f"👀 Watch {sym}", callback_data=f"watch_{sym}")
+                ])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(self.formatter.format_morning_signal(plans), parse_mode="HTML", reply_markup=reply_markup)
         else:
             await update.message.reply_text("📭 Tidak ada trade plan lolos risk engine.")
 
@@ -815,6 +832,41 @@ class IDXDayTraderBot:
         
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        user_id = str(query.from_user.id)
+        data = query.data
+
+        if data.startswith("watch_"):
+            symbol = data.split("_")[1]
+            wl = self.storage.get_watchlist(user_id)
+            if symbol in wl:
+                await query.message.reply_text(f"⚠️ {symbol} sudah ada di watchlist.")
+            elif len(wl) >= 10:
+                await query.message.reply_text("Watchlist penuh (maks 10).")
+            else:
+                self.storage.add_to_watchlist(user_id, symbol)
+                await query.message.reply_text(f"✅ <b>{symbol}</b> ditambahkan ke watchlist.", parse_mode="HTML")
+
+        elif data.startswith("detail_"):
+            symbol = data.split("_")[1]
+            await query.message.reply_text(f"🔬 Menganalisa {symbol}...")
+            try:
+                loop    = asyncio.get_event_loop()
+                macro_t = self._get_macro_async()
+                ihsg_t  = self._get_ihsg_async()
+                macro, ihsg_chg = await asyncio.gather(macro_t, ihsg_t)
+                res = await loop.run_in_executor(None, self._analyze_one, symbol, 0, False, ihsg_chg)
+                await query.message.reply_text(self.formatter.format_macro_context(macro), parse_mode="HTML")
+                if res:
+                    await query.message.reply_text(self.formatter.format_detail(res), parse_mode="HTML")
+                else:
+                    await query.message.reply_text(f"❌ Data {symbol} tidak ditemukan.")
+            except Exception as exc:
+                logger.error(f"Callback detail [{symbol}]: {exc}")
+                await query.message.reply_text(f"⚠️ Error saat menganalisa {symbol}.")
+
     # ------------------------------------------------------------------ #
     #  MAIN RUNNER
     # ------------------------------------------------------------------ #
@@ -848,6 +900,9 @@ class IDXDayTraderBot:
         # Message handlers
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
+        
+        # Callback handler for inline buttons
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
 
         # Global error handler — mencegah unhandled exception spam di log
         async def _global_error_handler(update_obj, ctx) -> None:
