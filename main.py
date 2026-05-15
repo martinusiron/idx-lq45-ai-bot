@@ -323,12 +323,10 @@ class IDXDayTraderBot:
     async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = self.session.now()
         if not is_trading_day(now.date()):
-            await update.message.reply_text("📅 Hari ini bursa IDX libur.")
-            return
-        if not self._is_market_hours():
-            await update.message.reply_text(self._market_closed_message())
-            return
-        if not is_safe_trading_time(now.hour, now.minute):
+            await update.message.reply_text("📅 Hari ini bursa IDX libur. Sinyal didasarkan pada penutupan pasar terakhir.")
+        elif not self._is_market_hours():
+            await update.message.reply_text("⏰ Bursa IDX sedang tutup. Sinyal didasarkan pada data terakhir.")
+        elif not is_safe_trading_time(now.hour, now.minute):
             await update.message.reply_text(
                 "⚠️ <b>Waktu kurang ideal untuk entry.</b>\n"
                 "Sinyal tetap ditampilkan untuk referensi.",
@@ -372,7 +370,11 @@ class IDXDayTraderBot:
             await update.message.reply_text("⚠️ Contoh: /detail BBCA")
             return
         symbol = context.args[0].upper().replace(".JK", "")
-        await update.message.reply_text(f"🔬 Menganalisa {symbol}...")
+        now = self.session.now()
+        if not is_trading_day(now.date()):
+            await update.message.reply_text(f"📅 Bursa libur. Menganalisa {symbol} dari data terakhir...")
+        else:
+            await update.message.reply_text(f"🔬 Menganalisa {symbol}...")
         try:
             loop    = asyncio.get_event_loop()
             macro_t = self._get_macro_async()
@@ -389,7 +391,11 @@ class IDXDayTraderBot:
             await update.message.reply_text(f"⚠️ Error saat menganalisa {symbol}.")
 
     async def cmd_top(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("📊 Memindai LQ45, tunggu ~20 detik...")
+        now = self.session.now()
+        if not is_trading_day(now.date()):
+            await update.message.reply_text("📅 Bursa libur. Memindai data terakhir...")
+        else:
+            await update.message.reply_text("📊 Memindai LQ45, tunggu ~20 detik...")
         try:
             macro_t = self._get_macro_async()
             ihsg_t  = self._get_ihsg_async()
@@ -419,13 +425,19 @@ class IDXDayTraderBot:
 
     async def cmd_setmodal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            await update.message.reply_text(f"💰 Modal: Rp {self.risk.account_size/1e6:.0f}jt\nUbah: /setmodal 10")
+            await update.message.reply_text(f"💰 Modal Saat Ini: Rp {self.risk.account_size:,.0f}\nUbah (dalam juta): /setmodal 4.5\nAtau absolut: /setmodal 4500000")
             return
         try:
-            self.risk.account_size = float(context.args[0]) * 1_000_000
-            await update.message.reply_text(f"✅ Modal: <b>Rp {context.args[0]} juta</b>", parse_mode="HTML")
+            val = float(context.args[0])
+            if val < 100000:
+                # Asumsikan user input dalam format jutaan (contoh: 4.5)
+                self.risk.account_size = val * 1_000_000
+            else:
+                # Asumsikan user input nilai utuh (contoh: 4500000)
+                self.risk.account_size = val
+            await update.message.reply_text(f"✅ Modal diatur menjadi: <b>Rp {self.risk.account_size:,.0f}</b>", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("⚠️ Format: /setmodal 10")
+            await update.message.reply_text("⚠️ Format: /setmodal 4.5 atau /setmodal 4500000")
 
     async def cmd_setrisk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
@@ -687,6 +699,15 @@ class IDXDayTraderBot:
                 INFORMASI PENTING UNTUKMU:
                 - Hari dan Tanggal Saat Ini: {now_str}
                 - Referensi semua event kalender, hari ini, besok, dsb. HARUS merujuk pada tanggal ini.
+
+                FITUR & COMMAND BOT YANG BISA KAMU REKOMENDASIKAN KE USER:
+                - /signal : Tarik rekomendasi saham otomatis (Swing/Day Trading)
+                - /detail <KODE> : Cek teknikal mendalam 1 saham (contoh: /detail BBCA)
+                - /macro : Cek kondisi ekonomi global (DXY, VIX, IHSG)
+                - /performa : Lihat histori win rate & profit bot
+                - /watchlist & /watch <KODE> : Pantau saham incaran
+                - /alert <KODE> <HARGA> : Set alarm harga otomatis
+                - /setmodal & /setrisk : Atur manajemen risiko portfolio user
 
                 IDENTITAS & KARAKTER:
                 - Seorang veteran trader IDX dengan pengalaman 15+ tahun
