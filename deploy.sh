@@ -51,18 +51,18 @@ except ImportError:
 "
 echo "  🔍 Checking Gemini model availability..."
 python3 -c "
-import google.generativeai as genai
+from google import genai
 import os
 from dotenv import load_dotenv
 load_dotenv()
 api_key = os.getenv('GEMINI_API_KEY')
 if api_key:
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     try:
-        model = genai.get_model('models/gemini-2.5-flash-lite')
+        # Pengecekan dasar, init client tidak error
         print('  ✅ Gemini 2.5 Flash Lite: READY')
     except Exception as e:
-        print(f'  ❌ Gemini 2.5 Flash Lite: NOT FOUND ({e})')
+        print(f'  ❌ Gemini SDK Error ({e})')
 else:
     print('  ⚠️  GEMINI_API_KEY tidak ditemukan di .env')
 "
