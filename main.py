@@ -631,7 +631,11 @@ class IDXDayTraderBot:
             ihsg_chg = await self._get_ihsg_async()
             if ihsg_chg is not None:
                 arah  = "menguat" if ihsg_chg > 0 else "melemah"
-                market_context += f"- IHSG hari ini {arah} {ihsg_chg:+.2f}%\n"
+                now_date = self.session.now().date()
+                if is_trading_day(now_date):
+                    market_context += f"- Pergerakan IHSG hari ini: {arah} {ihsg_chg:+.2f}%\n"
+                else:
+                    market_context += f"- Pasar libur hari ini. Pergerakan IHSG pada penutupan bursa terakhir: {arah} {ihsg_chg:+.2f}%\n"
 
             # Fetch makro jika relevan
             if any(k in text_lower for k in [

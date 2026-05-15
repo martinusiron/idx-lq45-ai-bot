@@ -177,8 +177,13 @@ class SignalMonitor:
         while self.running:
             now = datetime.now(TZ)
             if is_trading_day(now.date()) and is_safe_trading_time(now.hour, now.minute):
-                await self.check_once(chat_id, trade_date_fn())
-            await asyncio.sleep(15 * 60)
+                try:
+                    await self.check_once(chat_id, trade_date_fn())
+                except Exception as exc:
+                    logger.error(f"[monitor] Critical error in check_once: {exc}")
+            
+            # Cek harga live tiap 3 menit (sebelumnya 15 menit terlalu lambat untuk day trading)
+            await asyncio.sleep(3 * 60)
 
     def stop(self) -> None:
         self.running = False

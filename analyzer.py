@@ -838,6 +838,20 @@ class StockAnalyzer:
             logger.info(f"[{symbol}] TIDAK LOLOS threshold ({score} < {threshold})")
             return None
 
+        # ── Fungsi Fraksi Harga (Tick Size) IDX ───────────────────────────
+        def round_to_tick(val: float) -> int:
+            if val < 200:
+                tick = 1
+            elif val < 500:
+                tick = 2
+            elif val < 2000:
+                tick = 5
+            elif val < 5000:
+                tick = 10
+            else:
+                tick = 25
+            return int(round(val / tick) * tick)
+
         # ── Entry / TP / SL — Swing Trading Grade ─────────────────────
         price    = round(float(latest["close"]), 2)
         atr      = round(float(latest["atr"]), 2)
@@ -846,29 +860,33 @@ class StockAnalyzer:
         # Swing entry: beli di closing hari ini atau limit esok pagi
         entry_data = self._calc_best_entry(price, support,
                                            round(float(latest["vwap"]), 0), bb_lower)
-        best_entry = entry_data["best_entry"]
+        best_entry = round_to_tick(entry_data["best_entry"])
         entry_type = entry_data["entry_type"]
 
         # SL — swing lebih lebar: 2x ATR di bawah swing low
-        sl = int(max(
+        calculated_sl = int(max(
             round(support * 0.99, 0),
             round(price - atr * SWING_ATR_SL_MULTIPLIER, 0)
         ))
+        # Rule: SL maksimal 2% dari harga saat ini
+        sl = round_to_tick(max(calculated_sl, price * 0.98))
+        
         sl_distance = price - sl if price - sl > 0 else price * 0.02
 
         # TP1 — 2.5x ATR atau resistance terdekat
-        tp1 = int(max(
+        calculated_tp1 = int(max(
             round(resistance * 0.99, 0),
             round(price + atr * SWING_ATR_TP1_MULTIPLIER, 0)
         ))
+        # Rule: TP1 minimal +3% dari harga
+        tp1 = round_to_tick(max(calculated_tp1, price * 1.03))
 
         # TP2 — Fibonacci 1.618 extension (lebih jauh untuk swing)
         rec20   = df.iloc[-20:]
-        fib_tp2 = round(
-            float(rec20["low"].min()) +
-            (float(rec20["high"].max()) - float(rec20["low"].min())) * 1.618, 0
-        )
-        tp2 = int(fib_tp2) if fib_tp2 > tp1 * 1.05 else int(tp1 * 1.08)
+        fib_tp2 = float(rec20["low"].min()) + (float(rec20["high"].max()) - float(rec20["low"].min())) * 1.618
+        calculated_tp2 = fib_tp2 if fib_tp2 > tp1 * 1.05 else tp1 * 1.08
+        # Rule: TP2 minimal +5% dari harga
+        tp2 = round_to_tick(max(calculated_tp2, price * 1.05))
 
         e2sl = best_entry - sl
         rrr  = round((tp1 - best_entry) / e2sl, 2) if e2sl > 0 else 0
