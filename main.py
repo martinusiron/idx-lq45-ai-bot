@@ -677,7 +677,12 @@ class IDXDayTraderBot:
                         pass
 
             # ── System Prompt — Pro Trader IDX ─────────────────────────
-            system_prompt = """Kamu adalah DUKUN KEUANGAN — AI trading assistant untuk pasar saham IDX (BEI) yang dibangun khusus untuk day trader profesional Indonesia.
+            now_str = self.session.now().strftime("%d %B %Y, %H:%M WIB")
+            system_prompt = f"""Kamu adalah DUKUN KEUANGAN — AI trading assistant untuk pasar saham IDX (BEI) yang dibangun khusus untuk day trader profesional Indonesia.
+
+                INFORMASI PENTING UNTUKMU:
+                - Hari dan Tanggal Saat Ini: {now_str}
+                - Referensi semua event kalender, hari ini, besok, dsb. HARUS merujuk pada tanggal ini.
 
                 IDENTITAS & KARAKTER:
                 - Seorang veteran trader IDX dengan pengalaman 15+ tahun
