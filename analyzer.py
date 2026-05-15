@@ -56,6 +56,7 @@ class StockAnalyzer:
         self.min_adx          = 20
         self.max_spread_pct   = 3.0
         self._goapi_ok        = True   # Circuit breaker: False jika quota habis
+        self._cache           = {}     # { "symbol_interval": (datetime, pd.DataFrame) }
 
     # ------------------------------------------------------------------ #
     #  DATA FETCHING
@@ -74,9 +75,17 @@ class StockAnalyzer:
         - GoAPI timeout / tidak bisa dihubungi
         - GoAPI mengembalikan data kosong
         """
+        now = datetime.now()
+        cache_key = f"{symbol}_{interval}"
+        if cache_key in self._cache:
+            cached_time, cached_df = self._cache[cache_key]
+            if (now - cached_time).total_seconds() < 1800:  # Cache 30 menit
+                return cached_df
+
         if GOAPI_API_KEY and self._goapi_ok:
             df = self._fetch_goapi(symbol, interval)
             if df is not None and not df.empty:
+                self._cache[cache_key] = (now, df)
                 return df
 
         try:
@@ -94,6 +103,7 @@ class StockAnalyzer:
 
             if len(df) < self.min_data_points:
                 return None
+            self._cache[cache_key] = (now, df)
             return df
         except Exception as exc:
             logger.error(f"[{symbol}] fetch_data error: {exc}")
@@ -873,6 +883,7 @@ class StockAnalyzer:
             "entry_type":        entry_type,
             "tp1":               tp1,
             "tp2":               tp2,
+            "reasons_list":      reasons,
             "sl":                sl,
             "rrr":               rrr,
             "atr":               atr,

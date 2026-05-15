@@ -252,6 +252,14 @@ class IDXDayTraderBot:
             await send(self.formatter.format_macro_context(macro), parse_mode="HTML")
             await self._send_trade_update(send, trade_date, finalize=True,
                                           empty_msg="📭 Tidak ada trade plan aktif.")
+            
+            # EOD Friday: Weekly Summary
+            if now.weekday() == 4: # 4 = Friday
+                history = self.storage.get_closed_trades(days=5)
+                if history:
+                    weekly_msg = self.formatter.format_performance(history, period_days=5)
+                    await send(f"📅 <b>Weekly EOD Summary</b>\n\n{weekly_msg}", parse_mode="HTML")
+
         except Exception as exc:
             logger.error(f"job_afternoon_update: {exc}")
 

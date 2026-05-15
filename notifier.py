@@ -206,9 +206,18 @@ class TelegramFormatter:
             f"  TP2 (runner) : Rp {tp2:,}  (+{tp2_pct}%)\n"
             f"  SL (swing)   : Rp {sl:,}  (-{sl_pct}%)\n"
             f"  RRR          : 1 : {s.get('rrr', 'N/A')}\n\n"
-            f"Sinyal  : <i>{s.get('alasan', '')}</i>\n"
-            f"Skor AI : {score}/100\n\n"
-            f"<b>Rekomendasi: {rik} {rek}</b>\n\n"
+        )
+        
+        reasons = s.get("reasons_list", [])
+        if reasons:
+            msg += f"<b>Poin Skor ({score}/100):</b>\n"
+            for r in reasons:
+                msg += f"  • {r}\n"
+        else:
+            msg += f"Skor AI : {score}/100\nSinyal : <i>{s.get('alasan', '')}</i>\n"
+
+        msg += (
+            f"\n<b>Rekomendasi: {rik} {rek}</b>\n\n"
             f"⚠️ <i>Bukan rekomendasi finansial.</i>"
         )
         return msg
